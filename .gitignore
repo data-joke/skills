@@ -1,0 +1,19 @@
+# macOS 系统文件
+.DS_Store
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 凭证(切勿提交)
+.env
+
+# 打包产物
+*.zip
+
+# ---- 暂未发布的 skill(发布时从本清单移除对应目录后 add)----
+data-analysis/
+write-article/
+github/
+llm-gateway-model/
+mmx-cli
