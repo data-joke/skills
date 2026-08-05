@@ -7,7 +7,7 @@
   * 写操作(restart/stop/set-success/complement run/file create/submit/deploy)
     需 --yes 确认;--dry-run 仅打印将执行的请求、不真正调用
   * 守护式 SDK import:缺依赖时给出安装指引并以退出码 6 退出
-  * 凭证默认复用 odps MCP 的环境变量(ODPS_ACCESS_ID/ODPS_ACCESS_KEY)
+  * 凭证默认读取 DATAWORKS_ACCESS_KEY_ID/SECRET,回退 ALIBABA_CLOUD_ACCESS_KEY_ID/SECRET
 
 退出码:
   0 成功 · 1 API/一般错误 · 2 用法错误或缺 --yes · 3 鉴权
@@ -113,15 +113,15 @@ def region_from_endpoint(ep):
 
 def build_ctx(args):
     ak = args.access_key_id or envget(
-        "DATAWORKS_ACCESS_KEY_ID", "ODPS_ACCESS_ID", "ALIBABA_CLOUD_ACCESS_KEY_ID"
+        "DATAWORKS_ACCESS_KEY_ID", "ALIBABA_CLOUD_ACCESS_KEY_ID"
     )
     sk = args.access_key_secret or envget(
-        "DATAWORKS_ACCESS_KEY_SECRET", "ODPS_ACCESS_KEY", "ALIBABA_CLOUD_ACCESS_KEY_SECRET"
+        "DATAWORKS_ACCESS_KEY_SECRET", "ALIBABA_CLOUD_ACCESS_KEY_SECRET"
     )
     region = (
         args.region
         or envget("DATAWORKS_REGION_ID")
-        or region_from_endpoint(envget("ODPS_ENDPOINT"))
+        or envget("ALIBABA_CLOUD_REGION_ID")
         or "cn-shanghai"
     )
     endpoint = args.endpoint or envget("DATAWORKS_ENDPOINT") or f"dataworks.{region}.aliyuncs.com"
@@ -149,8 +149,8 @@ def make_client(ctx):
     require_sdk()
     if not ctx.ak or not ctx.sk:
         die(
-            "缺少 AccessKey。请设置 ODPS_ACCESS_ID/ODPS_ACCESS_KEY(复用 odps)或 "
-            "DATAWORKS_ACCESS_KEY_ID/SECRET,或在 skill 目录 .env 中配置。",
+            "缺少 AccessKey。请设置 DATAWORKS_ACCESS_KEY_ID/SECRET(或 "
+            "ALIBABA_CLOUD_ACCESS_KEY_ID/SECRET),或在技能目录 .env 中配置。",
             E_AUTH,
         )
     cfg = oapi_models.Config(
@@ -772,9 +772,9 @@ def add_global_flags(parser, suppress=False):
     """全局参数。suppress=True 时默认值用 SUPPRESS,挂在子命令上也不会覆盖顶层已给的值。"""
     sd = argparse.SUPPRESS
     d = (lambda real: sd if suppress else real)
-    parser.add_argument("--access-key-id", default=d(None), help="默认取 ODPS_ACCESS_ID / DATAWORKS_ACCESS_KEY_ID")
-    parser.add_argument("--access-key-secret", default=d(None), help="默认取 ODPS_ACCESS_KEY / DATAWORKS_ACCESS_KEY_SECRET")
-    parser.add_argument("-r", "--region", default=d(None), help="默认 DATAWORKS_REGION_ID 或从 ODPS_ENDPOINT 解析,否则 cn-shanghai")
+    parser.add_argument("--access-key-id", default=d(None), help="默认取 DATAWORKS_ACCESS_KEY_ID / ALIBABA_CLOUD_ACCESS_KEY_ID")
+    parser.add_argument("--access-key-secret", default=d(None), help="默认取 DATAWORKS_ACCESS_KEY_SECRET / ALIBABA_CLOUD_ACCESS_KEY_SECRET")
+    parser.add_argument("-r", "--region", default=d(None), help="默认 DATAWORKS_REGION_ID / ALIBABA_CLOUD_REGION_ID,否则 cn-shanghai")
     parser.add_argument("--endpoint", default=d(None), help="默认 dataworks.<region>.aliyuncs.com")
     parser.add_argument("--project-id", default=d(None), help="DataWorks 工作空间数字 ID(默认 DATAWORKS_PROJECT_ID)")
     parser.add_argument("--env", default=d(None), help="ProjectEnv,默认 PROD(可选 DEV)")

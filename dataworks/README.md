@@ -71,8 +71,8 @@ python3 skills/dataworks/scripts/dwcli.py project list     # 列出工作空间,
 
 | 变量 | 说明 | 默认 / 回退 |
 |---|---|---|
-| `ODPS_ACCESS_ID` / `ODPS_ACCESS_KEY` | AccessKey | 回退 `DATAWORKS_ACCESS_KEY_ID/SECRET`、`ALIBABA_CLOUD_ACCESS_KEY_*` |
-| `DATAWORKS_REGION_ID` | 区域 | 从 `ODPS_ENDPOINT` 解析,否则 `cn-shanghai` |
+| `DATAWORKS_ACCESS_KEY_ID` / `DATAWORKS_ACCESS_KEY_SECRET` | AccessKey | 回退 `ALIBABA_CLOUD_ACCESS_KEY_ID/SECRET` |
+| `DATAWORKS_REGION_ID` | 区域 | 回退 `ALIBABA_CLOUD_REGION_ID`,默认 `cn-shanghai` |
 | `DATAWORKS_ENDPOINT` | 覆盖 endpoint(VPC/金融云) | `dataworks.<region>.aliyuncs.com` |
 | `DATAWORKS_PROJECT_ID` | 工作空间数字 ID | 可先留空,`project list` 查 |
 | `DATAWORKS_PROJECT_ENV` | 环境 | `PROD` |

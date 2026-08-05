@@ -72,7 +72,7 @@ python3 scripts/dwcli.py <子命令> <操作> --help   # 操作级,如 file crea
 
 | 现象 | 处理 |
 |---|---|
-| 鉴权失败(退出码 3) | 凭证复用 odps MCP 的 `ODPS_ACCESS_ID/KEY` 或技能目录 `.env`;`doctor` 自检 |
+| 鉴权失败(退出码 3) | 凭证用 `DATAWORKS_ACCESS_KEY_ID/SECRET`(或 `ALIBABA_CLOUD_ACCESS_KEY_*`)或技能目录 `.env`;`doctor` 自检 |
 | 查不到数据 | 确认 `--env`(PROD/DEV)与业务日期;`--debug` 看实际请求 |
 | 结果与预期不符 | 先 `instance list --failed` + `instance log` 分析根因,再决定是否重跑/置成功 |
 

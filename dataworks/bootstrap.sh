@@ -9,7 +9,7 @@ python3 -m pip install -r requirements.txt
 echo "== [2/3] 生成 .env 模板(若不存在)=="
 if [ ! -f .env ]; then
   cp config.example.env .env
-  echo "已创建 .env,请编辑填入你的 AccessKey(或复用已设置的 ODPS_* 环境变量)。"
+  echo "已创建 .env,请编辑填入你的 AccessKey(或复用已设置的 DATAWORKS_* / ALIBABA_CLOUD_* 环境变量)。"
 else
   echo ".env 已存在,跳过。"
 fi
