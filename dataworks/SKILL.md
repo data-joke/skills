@@ -35,7 +35,7 @@ python3 scripts/dwcli.py <子命令> <操作> --help   # 操作级,如 file crea
 
 | 用户意图 | 命令 | 备注 |
 |---|---|---|
-| 找/解析某任务 | `node resolve --name <任务名>` | 名称不完整时先 `node list --name 关键字` |
+| 找/解析某任务 | `node resolve --name <任务名>` | `node list --name` 为**精确匹配**;名称不完整时用 `file list --keyword 关键字`(模糊包含) |
 | 查作业所在目录 | `file folder (--name <任务名> \| --file-id <id> \| --node-id <id>)` | 输出完整 FolderPath,如 `Business Flow/.../商创/python脚本`;`file list` 也带 file_folder_id/path |
 | 查上/下游节点 | `node parents \| node children (--node-id <id> \| --task-name <名>)` | 重跑/补数前评估影响面 |
 | 查节点代码 | `file get (--node-id <id> \| --file-id <id>) --format text` | `file list --keyword` 按关键字找 file_id |
