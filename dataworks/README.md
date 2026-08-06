@@ -7,9 +7,16 @@
 支持的能力:
 
 - **新建开发节点**:可配置调度频率/时间(cron、周期、生效起止)、重跑属性(重跑模式、自动重跑次数/间隔)、依赖与调度参数;并可提交/发布上线。
-- **实例运维**:查实例状态、查运行日志、**分析失败原因**、重跑 / 停止 / 置成功。
+- **实例运维**:查实例状态、查运行日志、**分析失败原因**、重跑 / 停止 / 置成功;`instance stat` 按业务日期输出状态分布 + 失败 Top 节点。
 - **补数据**:按任务名或业务日期范围发起补数据,并跟踪补数据 DAG 进度。
 - **元数据/代码**:查节点代码,节点/文件/项目列表。
+- **节点血缘/影响面**:`node parents` / `node children` 查上/下游,重跑或补数前评估影响面。
+- **业务流程**:`business list` / `get` / `files` 列出业务流程及其下作业。
+- **文件版本**:`file versions` / `file version` 查版本历史与任意版本代码。
+- **表元数据/表血缘**:`meta table`(表结构)、`meta lineage`(上下游表),表名用 `project.table`。
+- **资源组**:`resource list` 列出调度/计算资源组。
+- **基线保障**:`baseline list` / `baseline status` 查基线配置与当天各基线 SAFE/DANGER 状态。
+- **数据质量 DQC(只读)**:`quality entity` / `rules` / `results` 查质量实体、规则与校验结果。
 - **按任务名解析作业 ID**:说任务名即可解析出 nodeId/fileId 再操作(如“给 xxx 任务补数”)。
 
 **适用场景**:DataWorks 日常数据开发与运维(早上查失败任务、看日志定位原因、重跑、补数、新建/调整节点等)。
@@ -35,6 +42,8 @@ python3 -m pip install -r requirements.txt
 # 或一键脚本(装依赖 + 生成 .env + 自检):
 bash bootstrap.sh
 ```
+
+> 💡 Windows(Git Bash)可能只有 `python` 无 `python3`(且 `WindowsApps/python3` 是 Microsoft Store 假入口,运行即失败)。bootstrap.sh 已自动探测回退到 `python`;手动安装时请用 `python -m pip install -r requirements.txt`。
 
 **3. 配置你自己的凭证**
 
@@ -110,5 +119,8 @@ dataworks/
 | 节点类型编码不对 | 用 DataWorks 控制台核对数字编码,`--type` 可直接传数字 |
 | 查实例结果不完整/超时 | `instance list` 必须带 `--biz-date`(或状态/节点)限定范围,否则拉全量历史 |
 | 多个工作空间易混 | 操作前用 `project list` 确认目标 `--project-id`,防跨空间误操作 |
+| `baseline status` 报 bizdate 格式错误 | CLI 已内部把 `--biz-date` 转 `yyyy-MM-ddTHH:mm:ss+0800`(RFC822 时区);勿手动传字面 `Z` |
+| `quality entity` 返回空 | 该工作空间未配置 DQC 质量实体,需先在「数据质量」模块为表建实体/规则 |
+| 全量遍历命令限流(417 Throttling) | `instance stat` / `business files` / `meta` 为分页遍历,CLI 已自动退避重试 |
 
 > 写操作(新建/提交/发布/重跑/停止/置成功/补数据)均需 `--yes` 确认;`--dry-run` 可先预览将执行的请求。详见 `SKILL.md`。

@@ -14,11 +14,13 @@
   4 未找到/零匹配 · 5 无权限 · 6 SDK 未安装 · 7 超时
 """
 import argparse
+import collections
 import datetime
 import json
 import os
 import re
 import sys
+import time
 from types import SimpleNamespace
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -208,19 +210,27 @@ def handle_api_error(e):
     die(msg, E_ERR, **extra)
 
 
-def call(ctx, method_name, request):
+def call(ctx, method_name, request, retries=2):
+    """调用 API。遇 Throttling(417 限流)自动退避重试,缓解全量遍历命令的中途失败。"""
     client = make_client(ctx)
     if ctx.debug:
         try:
             eprint("[debug] " + method_name + " " + json.dumps(request.to_map(), ensure_ascii=False, default=str))
         except Exception:
             eprint("[debug] " + method_name)
-    try:
-        resp = getattr(client, method_name)(request)
-    except SystemExit:
-        raise
-    except Exception as e:  # noqa: BLE001
-        handle_api_error(e)
+    resp = None
+    for attempt in range(retries + 1):
+        try:
+            resp = getattr(client, method_name)(request)
+            break
+        except SystemExit:
+            raise
+        except Exception as e:  # noqa: BLE001
+            code = str(getattr(e, "code", "") or "").lower()
+            if "throttl" in code and attempt < retries:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            handle_api_error(e)
     body = getattr(resp, "body", resp)
     if hasattr(body, "to_map"):
         body = body.to_map()
@@ -491,9 +501,37 @@ def cmd_node_resolve(ctx, args):
     out(ctx, res, ["node_id", "node_name", "file_id", "owner", "program_type", "cron_express"])
 
 
+def _node_adjacent(ctx, args, action, method, model_name):
+    """node parents / node children 公共逻辑:解析节点 → 查上/下游。"""
+    node_id = args.node_id
+    if args.task_name and not node_id:
+        node = resolve_single_node(ctx, args.task_name)
+        node_id = node["node_id"]
+    if not node_id:
+        die(f"{action} 需要 --node-id 或 --task-name。", E_USAGE)
+    req_cls = getattr(dw_models, model_name)
+    body = call(ctx, method, req_cls(node_id=int(node_id), project_env=ctx.env))
+    rows = [{
+        "node_id": g(n, "NodeId"), "node_name": g(n, "NodeName"),
+        "owner": g(n, "OwnerId") or g(n, "Owner"), "program_type": g(n, "ProgramType"),
+        "cron": g(n, "CronExpress"), "scheduler_type": g(n, "SchedulerType"),
+    } for n in extract_list(body, "Nodes")]
+    out(ctx, rows, ["node_id", "node_name", "owner", "program_type", "cron", "scheduler_type"])
+
+
+def cmd_node_parents(ctx, args):
+    _node_adjacent(ctx, args, "node parents", "get_node_parents", "GetNodeParentsRequest")
+
+
+def cmd_node_children(ctx, args):
+    _node_adjacent(ctx, args, "node children", "get_node_children", "GetNodeChildrenRequest")
+
+
 def cmd_file_list(ctx, args):
     pid = need_project(ctx)
-    req = dw_models.ListFilesRequest(project_id=pid, page_number=args.page_number, page_size=args.page_size)
+    # need_absolute_folder_path=True 才能拿到 AbsoluteFolderPath,否则目录路径为空
+    req = dw_models.ListFilesRequest(project_id=pid, page_number=args.page_number, page_size=args.page_size,
+                                     need_absolute_folder_path=True)
     if args.keyword:
         req.keyword = args.keyword
     if args.exact_file_name:
@@ -507,8 +545,76 @@ def cmd_file_list(ctx, args):
     rows = [{
         "file_id": g(f, "FileId"), "file_name": g(f, "FileName"), "node_id": g(f, "NodeId"),
         "file_type": g(f, "FileType"), "owner": g(f, "Owner"), "use_type": g(f, "UseType"),
+        "file_folder_id": g(f, "FileFolderId"), "file_folder_path": g(f, "AbsoluteFolderPath") or "",
     } for f in files]
-    out(ctx, rows, ["file_id", "file_name", "node_id", "file_type", "owner"])
+    out(ctx, rows, ["file_id", "file_name", "node_id", "file_type", "owner",
+                    "file_folder_id", "file_folder_path"])
+
+
+def cmd_file_folder(ctx, args):
+    """查作业/文件所在目录。输入 --file-id / --node-id / --name 之一,输出完整 FolderPath。"""
+    pid = need_project(ctx)
+    file_id, node_id = args.file_id, args.node_id
+    # 名称 → 解析到 node_id/file_id
+    if args.name and not file_id and not node_id:
+        node = resolve_single_node(ctx, args.name)
+        node_id = node.get("node_id")
+        file_id = node.get("file_id")
+    if not file_id and not node_id:
+        die("file folder 需要 --file-id / --node-id / --name 之一。", E_USAGE)
+
+    # 1) GetFile 拿 FileFolderId(同时可兜底补 file_id/node_id)
+    greq = dw_models.GetFileRequest(project_id=pid)
+    if file_id:
+        greq.file_id = int(file_id)
+    if node_id:
+        greq.node_id = int(node_id)
+    gbody = call(ctx, "get_file", greq)
+    file_data = g(gbody, "Data", "File", default={}) or {}
+    fid = g(file_data, "FileFolderId")
+    if not fid:
+        die(f"文件(file_id={file_id or ''}, node_id={node_id or ''})未关联文件夹(直接挂在根目录)。", E_NOTFOUND)
+
+    # 2) GetFolder 拿完整目录路径(单次返回即绝对路径)
+    fbody = call(ctx, "get_folder", dw_models.GetFolderRequest(project_id=pid, folder_id=fid))
+    folder_data = g(fbody, "Data", default={}) or {}
+    out(ctx, {
+        "file_id": g(file_data, "FileId") or (int(file_id) if file_id else None),
+        "node_id": g(file_data, "NodeId") or (int(node_id) if node_id else None),
+        "file_name": g(file_data, "FileName"),
+        "file_folder_id": fid,
+        "folder_id": g(folder_data, "FolderId"),
+        "folder_path": g(folder_data, "FolderPath"),
+    })
+
+
+def cmd_file_versions(ctx, args):
+    """文件版本历史(不含代码,取代码用 `file version`)。"""
+    pid = need_project(ctx)
+    req = dw_models.ListFileVersionsRequest(
+        project_id=pid, file_id=int(args.file_id),
+        page_number=args.page_number, page_size=args.page_size)
+    body = call(ctx, "list_file_versions", req)
+    rows = [{
+        "file_version": g(v, "FileVersion"), "change_type": g(v, "ChangeType"),
+        "comment": g(v, "Comment"), "commit_time": ts_str(g(v, "CommitTime")),
+        "commit_user": g(v, "CommitUser"), "is_current_prod": g(v, "IsCurrentProd"),
+        "status": g(v, "Status"),
+    } for v in extract_list(body, "FileVersions")]
+    out(ctx, rows, ["file_version", "change_type", "comment", "commit_time", "commit_user", "is_current_prod"])
+
+
+def cmd_file_version(ctx, args):
+    """取指定版本详情/代码。"""
+    pid = need_project(ctx)
+    req = dw_models.GetFileVersionRequest(
+        project_id=pid, file_id=int(args.file_id), file_version=int(args.file_version))
+    body = call(ctx, "get_file_version", req)
+    v = g(body, "Data", default={}) or {}
+    if ctx.fmt == "text":
+        print(g(v, "FileContent") or g(v, "Content") or "")
+        return
+    out(ctx, v)
 
 
 def cmd_file_get(ctx, args):
@@ -608,6 +714,272 @@ def cmd_file_deploy(ctx, args):
     out(ctx, {"result": call(ctx, "deploy_file", req)})
 
 
+def cmd_business_list(ctx, args):
+    pid = need_project(ctx)
+    req = dw_models.ListBusinessRequest(project_id=pid, page_number=args.page_number, page_size=args.page_size)
+    if args.keyword:
+        req.keyword = args.keyword
+    body = call(ctx, "list_business", req)
+    rows = [{
+        "business_id": g(b, "BusinessId"), "business_name": g(b, "BusinessName"),
+        "description": g(b, "Description"), "owner": g(b, "Owner"), "use_type": g(b, "UseType"),
+    } for b in extract_list(body, "Business")]
+    out(ctx, rows, ["business_id", "business_name", "description", "owner"])
+
+
+def cmd_business_get(ctx, args):
+    pid = need_project(ctx)
+    body = call(ctx, "get_business",
+                dw_models.GetBusinessRequest(business_id=int(args.business_id), project_id=pid))
+    b = g(body, "Data", default={}) or {}
+    out(ctx, {
+        "business_id": g(b, "BusinessId"), "business_name": g(b, "BusinessName"),
+        "description": g(b, "Description"), "owner": g(b, "Owner"), "use_type": g(b, "UseType"),
+    })
+
+
+def cmd_business_files(ctx, args):
+    """某业务流程下的文件:ListFiles 全量分页筛选 BusinessId(ListFiles/ListNodes 均无按 business_id 过滤的 API)。
+    文件带 BusinessId,节点不带;故遍历文件匹配。全量遍历较慢,内置 0.3s/页退避防限流。"""
+    pid = need_project(ctx)
+    biz_id = str(args.business_id)
+    page, total, rows = 1, 0, []
+    while page <= 100:
+        req = dw_models.ListFilesRequest(project_id=pid, page_number=page, page_size=100,
+                                         need_absolute_folder_path=True)
+        if args.keyword:
+            req.keyword = args.keyword
+        body = call(ctx, "list_files", req)
+        files = extract_list(body, "Files")
+        total = g(body, "Data", "TotalCount", default=total) or total
+        for f in files:
+            if str(g(f, "BusinessId") or "") != biz_id:
+                continue
+            rows.append({
+                "file_id": g(f, "FileId"), "file_name": g(f, "FileName"),
+                "node_id": g(f, "NodeId"), "file_type": g(f, "FileType"),
+                "owner": g(f, "Owner"), "file_folder_path": g(f, "AbsoluteFolderPath") or "",
+            })
+        if not files or page * 100 >= total:
+            break
+        page += 1
+        time.sleep(0.3)  # 全量遍历防限流
+    if not rows:
+        die(f"业务流程 {biz_id} 下未找到文件。", E_NOTFOUND)
+    out(ctx, rows, ["file_id", "file_name", "node_id", "file_type", "file_folder_path"])
+
+
+def _meta_table_parts(s):
+    """把 project.table / odps.project.table 解析为 (project, table);缺 project 报错。"""
+    s = (s or "").strip()
+    if s.startswith("odps."):
+        s = s[5:]
+    parts = s.split(".")
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    die(f"无法解析表名: {s!r}(支持 project.table 或 odps.project.table,如 lyy_gz.ods_cpa_activity_order_hi)", E_USAGE)
+
+
+def cmd_meta_table(ctx, args):
+    """表结构/元数据(数据地图)。表名用 project.table,如 lyy_gz.ods_cpa_activity_order_hi。"""
+    proj, table = _meta_table_parts(args.table)
+    guid = f"odps.{proj}.{table}"
+    page, cols, total = 1, [], 0
+    while page <= 50:
+        req = dw_models.GetMetaTableFullInfoRequest(table_guid=guid, page_num=page, page_size=100)
+        body = call(ctx, "get_meta_table_full_info", req)
+        d = g(body, "Data", default={}) or {}
+        total = d.get("TotalColumnCount") or total
+        batch = d.get("ColumnList") or []
+        for c in batch:
+            cols.append({
+                "column_name": g(c, "ColumnName"), "column_type": g(c, "ColumnType"),
+                "comment": g(c, "Comment"), "is_partition": g(c, "IsPartitionColumn"),
+                "primary_key": g(c, "IsPrimaryKey"),
+            })
+        if not batch or len(cols) >= total:
+            break
+        page += 1
+        time.sleep(0.2)
+    out(ctx, {
+        "table": f"{proj}.{table}", "table_guid": guid,
+        "comment": g(body, "Data", "Comment"), "life_cycle": g(body, "Data", "LifeCycle"),
+        "owner": g(body, "Data", "OwnerId"), "project": g(body, "Data", "ProjectName"),
+        "create_time": ts_str(g(body, "Data", "CreateTime")), "last_modify_time": ts_str(g(body, "Data", "LastModifyTime")),
+        "total_columns": total or len(cols), "columns": cols,
+    })
+
+
+def cmd_meta_lineage(ctx, args):
+    """表血缘。direction: up 上游 / down 下游 / all 全部。"""
+    proj, table = _meta_table_parts(args.table)
+    guid = f"odps.{proj}.{table}"
+    direction = (args.direction or "all").upper()
+    entities, next_key = [], None
+    while True:
+        req = dw_models.GetMetaTableLineageRequest(
+            table_guid=guid, direction=direction, page_size=100)
+        if next_key:
+            req.next_primary_key = next_key
+        body = call(ctx, "get_meta_table_lineage", req)
+        d = g(body, "Data", default={}) or {}
+        batch = d.get("DataEntityList") or []
+        for e in batch:
+            entities.append({
+                "table_guid": g(e, "TableGuid"), "table_name": g(e, "TableName"),
+                "database": g(e, "DatabaseName"),
+            })
+        if not d.get("HasNext") or not batch:
+            break
+        next_key = d.get("NextPrimaryKey") or (batch[-1].get("TableGuid") if batch else None)
+        if next_key is None:
+            break
+        time.sleep(0.2)
+    out(ctx, {
+        "table": f"{proj}.{table}", "table_guid": guid,
+        "direction": direction, "count": len(entities), "entities": entities,
+    })
+
+
+def cmd_resource_list(ctx, args):
+    """列出资源组。默认合并类型 1(调度)+2(计算)去重;--type 指定单个。"""
+    types = [int(args.type)] if args.type else [1, 2]
+    seen, rows = set(), []
+    for rt in types:
+        body = call(ctx, "list_resource_groups", dw_models.ListResourceGroupsRequest(resource_group_type=rt))
+        items = g(body, "Data") or []
+        if not isinstance(items, list):
+            continue
+        for it in items:
+            rid = g(it, "Id")
+            if rid in seen:
+                continue
+            seen.add(rid)
+            rows.append({
+                "id": rid, "name": g(it, "Name"), "identifier": g(it, "Identifier"),
+                "type": g(it, "ResourceGroupType"), "mode": g(it, "Mode"),
+                "is_default": g(it, "IsDefault"), "status": g(it, "Status"),
+                "cluster": g(it, "Cluster"),
+            })
+    if not rows:
+        die("未找到资源组。", E_NOTFOUND)
+    out(ctx, rows, ["id", "name", "type", "mode", "is_default", "status", "cluster"])
+
+
+def cmd_baseline_list(ctx, args):
+    pid = need_project(ctx)
+    req = dw_models.ListBaselineConfigsRequest(project_id=pid, page_number=args.page_number, page_size=args.page_size)
+    if args.search_text:
+        req.search_text = args.search_text
+    body = call(ctx, "list_baseline_configs", req)
+    rows = [{
+        "baseline_id": g(b, "BaselineId"), "baseline_name": g(b, "BaselineName"),
+        "baseline_type": g(b, "BaselineType"),
+        "sla": f"{g(b, 'SlaHour')}:{str(g(b, 'SlaMinu') or 0).zfill(2)}",
+        "exp": f"{g(b, 'ExpHour')}:{str(g(b, 'ExpMinu') or 0).zfill(2)}",
+        "owner": g(b, "Owner"), "priority": g(b, "Priority"), "use_flag": g(b, "UseFlag"),
+    } for b in extract_list(body, "Baselines")]
+    out(ctx, rows, ["baseline_id", "baseline_name", "baseline_type", "sla", "exp", "owner", "priority", "use_flag"])
+
+
+def cmd_baseline_status(ctx, args):
+    """某天各基线保障状态。ListBaselineStatuses 的 bizdate 须为 yyyy-MM-ddTHH:mm:ss+0800(RFC822 时区,网关正则要求)。"""
+    if not args.biz_date or not re.match(r"^\d{4}-\d{2}-\d{2}$", str(args.biz_date)):
+        die("baseline status 需要 --biz-date YYYY-MM-DD。", E_USAGE)
+    bizdate = f"{args.biz_date}T00:00:00+0800"  # +0800=中国时区
+    req = dw_models.ListBaselineStatusesRequest(
+        bizdate=bizdate, page_number=args.page_number, page_size=args.page_size)
+    body = call(ctx, "list_baseline_statuses", req)
+    rows = [{
+        "baseline_id": g(b, "BaselineId"), "baseline_name": g(b, "BaselineName"),
+        "status": g(b, "Status"), "finish_status": g(b, "FinishStatus"),
+        "buffer_sec": g(b, "Buffer"), "sla_time": ts_str(g(b, "SlaTime")),
+        "finish_time": ts_str(g(b, "FinishTime")), "priority": g(b, "Priority"),
+    } for b in extract_list(body, "BaselineStatuses")]
+    out(ctx, {"biz_date": args.biz_date, "count": len(rows), "baselines": rows})
+
+
+def _dqc_list(body, keys):
+    """DQC 列表响应信封不统一:Data 可能直接是 list,也可能嵌套在指定 key 下。"""
+    d = g(body, "Data") or {}
+    if isinstance(d, list):
+        return d
+    if isinstance(d, dict):
+        for k in keys:
+            v = d.get(k) or d.get(k.lower()) or d.get(k.title())
+            if isinstance(v, list):
+                return v
+    return []
+
+
+def cmd_quality_entity(ctx, args):
+    """查表的质量实体(DQC)。表名用 project.table。"""
+    pid = need_project(ctx)
+    proj, table = _meta_table_parts(args.table)
+    body = call(ctx, "get_quality_entity", dw_models.GetQualityEntityRequest(
+        project_id=pid, project_name=proj, table_name=table, env_type=ctx.env))
+    rows = [{
+        "entity_id": g(e, "EntityId"), "table_name": g(e, "TableName"),
+        "match_expression": g(e, "MatchExpression"), "on_duty": g(e, "OnDuty"),
+        "env_type": g(e, "EnvType"),
+    } for e in _dqc_list(body, ("EntityList", "Entities"))]
+    out(ctx, rows, ["entity_id", "table_name", "match_expression", "on_duty", "env_type"])
+
+
+def cmd_quality_rules(ctx, args):
+    """查实体的质量规则。需 --entity-id(先用 `quality entity` 拿)。"""
+    pid = need_project(ctx)
+    if not args.entity_id:
+        die("quality rules 需要 --entity-id(先用 `quality entity --table project.table` 查)。", E_USAGE)
+    req = dw_models.ListQualityRulesRequest(
+        entity_id=int(args.entity_id), project_id=pid, project_name=args.project_name or "",
+        page_number=1, page_size=args.page_size)
+    body = call(ctx, "list_quality_rules", req)
+    rows = [{
+        "rule_id": g(r, "RuleId"), "rule_name": g(r, "RuleName"),
+        "checker_type": g(r, "CheckerType") or g(r, "CheckerName"),
+        "operator": g(r, "Operator"), "threshold": g(r, "Threshold"),
+        "match_expression": g(r, "MatchExpression"), "expect_value": g(r, "ExpectValue"),
+        "block_type": g(r, "BlockType"), "template_id": g(r, "TemplateId"),
+    } for r in _dqc_list(body, ("Rules", "RuleList", "Data"))]
+    out(ctx, rows, ["rule_id", "rule_name", "checker_type", "operator", "threshold", "expect_value"])
+
+
+def cmd_quality_results(ctx, args):
+    """查质量校验结果。--rule-id 或 --entity-id 二选一。日期 YYYY-MM-DD。"""
+    pid = need_project(ctx)
+    pname = args.project_name or ""
+    if not args.rule_id and not args.entity_id:
+        die("quality results 需要 --rule-id 或 --entity-id。", E_USAGE)
+    if args.rule_id:
+        req = dw_models.ListQualityResultsByRuleRequest(
+            rule_id=int(args.rule_id), project_id=pid, project_name=pname,
+            page_number=args.page_number, page_size=args.page_size)
+        if args.start_date:
+            req.start_date = args.start_date
+        if args.end_date:
+            req.end_date = args.end_date
+        body = call(ctx, "list_quality_results_by_rule", req)
+        items = _dqc_list(body, ("RuleCheckResultList", "Results", "Data"))
+    else:
+        req = dw_models.ListQualityResultsByEntityRequest(
+            entity_id=int(args.entity_id), project_id=pid, project_name=pname,
+            page_number=args.page_number, page_size=args.page_size)
+        if args.start_date:
+            req.start_date = args.start_date
+        if args.end_date:
+            req.end_date = args.end_date
+        body = call(ctx, "list_quality_results_by_entity", req)
+        items = _dqc_list(body, ("EntityCheckResultList", "Results", "Data"))
+    rows = [{
+        "rule_id": g(r, "RuleId"), "rule_name": g(r, "RuleName"),
+        "check_time": ts_str(g(r, "CheckTime")), "check_status": g(r, "CheckStatus") or g(r, "Status"),
+        "actual_value": g(r, "ActualValue") or g(r, "ActualExpression"),
+        "expect_value": g(r, "ExpectValue"), "operator": g(r, "Operator"),
+    } for r in items]
+    out(ctx, {"count": len(rows), "results": rows})
+
+
 def cmd_instance_list(ctx, args):
     node_id = args.node_id
     if args.task_name and not node_id:
@@ -659,6 +1031,68 @@ def cmd_instance_log(ctx, args):
         print(filtered)
     else:
         out(ctx, {"instance_id": int(args.instance_id), "matched_lines": len(lines), "log": filtered})
+
+
+def _summarize_status(s):
+    """DataWorks 实例状态 → 汇总桶(参考 reference/pitfalls.md 的状态口径)。"""
+    s = str(s or "").upper()
+    if "SUCCESS" in s:
+        return "success"
+    if "FAIL" in s:
+        return "failure"
+    if "RUN" in s or "CHECK" in s:
+        return "running"
+    if "WAIT" in s:
+        return "waiting"
+    if "NOT_RUN" in s or "NOTRUN" in s:
+        return "not_run"
+    if "SKIP" in s or "PAUSED" in s or "DONE" in s:
+        return "skipped"
+    return "other"
+
+
+def cmd_instance_stat(ctx, args):
+    """按业务日期统计实例:状态分布 + 失败 Top 节点(--biz-date 必填,限定范围)。"""
+    pid = need_project(ctx)
+    begin = to_biz_datetime(args.begin_bizdate or args.biz_date)
+    end = to_biz_datetime(args.end_bizdate or args.biz_date, end_of_day=True)
+    if not begin:
+        die("instance stat 需要 --biz-date YYYY-MM-DD(或 --begin-bizdate)。", E_USAGE)
+    buckets = collections.Counter()
+    by_status = collections.Counter()
+    failed_by_node = {}
+    page, total = 1, 0
+    while page <= 100:  # 分页遍历,ListInstances PageSize 上限 100
+        req = dw_models.ListInstancesRequest(
+            project_id=pid, project_env=ctx.env,
+            begin_bizdate=begin, end_bizdate=end,
+            page_number=page, page_size=100,
+        )
+        body = call(ctx, "list_instances", req)
+        insts = extract_list(body, "Instances")
+        total = g(body, "Data", "TotalCount", default=total) or total
+        for it in insts:
+            raw = str(g(it, "Status") or "").upper() or "UNKNOWN"
+            by_status[raw] += 1
+            buckets[_summarize_status(raw)] += 1
+            if "FAIL" in raw:
+                nid = g(it, "NodeId")
+                nm = g(it, "NodeName") or "?"
+                f = failed_by_node.setdefault(nid, {"node_id": nid, "node_name": nm, "count": 0})
+                f["count"] += 1
+        if not insts or sum(by_status.values()) >= total:
+            break
+        page += 1
+    total_found = sum(by_status.values())
+    failed_top = sorted(failed_by_node.values(), key=lambda x: x["count"], reverse=True)[:args.top]
+    out(ctx, {
+        "biz_date": args.biz_date or args.begin_bizdate or "",
+        "range": {"begin": begin, "end": end},
+        "total": total or total_found,
+        "summary": dict(buckets),
+        "by_status": dict(by_status),
+        "failed_top": failed_top,
+    })
 
 
 def _write_instance_op(ctx, args, status_target, action, model_name, method):
@@ -820,6 +1254,12 @@ def build_parser():
     nr.add_argument("--name", required=True); nr.add_argument("--exact", action="store_true")
     nr.add_argument("--limit", type=int, default=50)
     nr.set_defaults(func=cmd_node_resolve)
+    np = nodes.add_parser("parents", parents=[parent], help="上游(父)节点")
+    np.add_argument("--node-id"); np.add_argument("--task-name", help="按任务名解析")
+    np.set_defaults(func=cmd_node_parents)
+    nc = nodes.add_parser("children", parents=[parent], help="下游(子)节点")
+    nc.add_argument("--node-id"); nc.add_argument("--task-name", help="按任务名解析")
+    nc.set_defaults(func=cmd_node_children)
 
     # file
     filep = sub.add_parser("file", help="文件/节点代码")
@@ -829,9 +1269,19 @@ def build_parser():
     fl.add_argument("--owner"); fl.add_argument("--page-number", type=int, default=1)
     fl.add_argument("--page-size", type=int, default=50)
     fl.set_defaults(func=cmd_file_list)
+    ff = files.add_parser("folder", parents=[parent], help="查作业所在目录(FolderPath)")
+    ff.add_argument("--file-id"); ff.add_argument("--node-id"); ff.add_argument("--name", help="按任务名解析")
+    ff.set_defaults(func=cmd_file_folder)
     fg = files.add_parser("get", parents=[parent], help="取文件/节点代码(--format text 仅输出代码)")
     fg.add_argument("--file-id"); fg.add_argument("--node-id")
     fg.set_defaults(func=cmd_file_get)
+    fv = files.add_parser("versions", parents=[parent], help="文件版本历史")
+    fv.add_argument("--file-id", required=True)
+    fv.add_argument("--page-number", type=int, default=1); fv.add_argument("--page-size", type=int, default=20)
+    fv.set_defaults(func=cmd_file_versions)
+    fver = files.add_parser("version", parents=[parent], help="取某版本详情/代码(--format text 仅代码)")
+    fver.add_argument("--file-id", required=True); fver.add_argument("--file-version", required=True, type=int)
+    fver.set_defaults(func=cmd_file_version)
     fc = files.add_parser("create", parents=[parent], help="新建开发节点(写,需 --yes)")
     fc.add_argument("--name", required=True)
     fc.add_argument("--type", required=True, help=f"节点类型,别名: {', '.join(sorted(FILE_TYPES))} 或数字编码")
@@ -859,6 +1309,70 @@ def build_parser():
     fd.add_argument("--file-id"); fd.add_argument("--node-id"); fd.add_argument("--comment")
     fd.set_defaults(func=cmd_file_deploy)
 
+    # business 业务流程
+    biz = sub.add_parser("business", help="业务流程")
+    bizs = biz.add_subparsers(dest="sub", required=True)
+    bl = bizs.add_parser("list", parents=[parent], help="列出业务流程")
+    bl.add_argument("--keyword"); bl.add_argument("--page-number", type=int, default=1)
+    bl.add_argument("--page-size", type=int, default=50)
+    bl.set_defaults(func=cmd_business_list)
+    bg = bizs.add_parser("get", parents=[parent], help="业务流程详情")
+    bg.add_argument("--business-id", required=True)
+    bg.set_defaults(func=cmd_business_get)
+    bf = bizs.add_parser("files", parents=[parent], help="某业务流程下的文件(全量遍历匹配,较慢)")
+    bf.add_argument("--business-id", required=True); bf.add_argument("--keyword")
+    bf.set_defaults(func=cmd_business_files)
+
+    # meta 表元数据/血缘
+    meta = sub.add_parser("meta", help="表元数据/血缘(数据地图)")
+    metas = meta.add_subparsers(dest="sub", required=True)
+    mt = metas.add_parser("table", parents=[parent], help="表结构/元数据(表名用 project.table)")
+    mt.add_argument("--table", required=True, help="如 lyy_gz.ods_cpa_activity_order_hi")
+    mt.set_defaults(func=cmd_meta_table)
+    ml = metas.add_parser("lineage", parents=[parent], help="表血缘(上游/下游)")
+    ml.add_argument("--table", required=True, help="如 lyy_gz.ods_cpa_activity_order_hi")
+    ml.add_argument("--direction", choices=["up", "down", "all"], default="all", help="up 上游 / down 下游 / all 全部")
+    ml.set_defaults(func=cmd_meta_lineage)
+
+    # resource 资源组
+    res = sub.add_parser("resource", help="资源组")
+    ress = res.add_subparsers(dest="sub", required=True)
+    rl = ress.add_parser("list", parents=[parent], help="列出资源组(默认合并调度+计算)")
+    rl.add_argument("--type", type=int, help="仅指定类型:1=调度,2=计算")
+    rl.set_defaults(func=cmd_resource_list)
+
+    # baseline 基线保障
+    bln = sub.add_parser("baseline", help="基线保障")
+    blns = bln.add_subparsers(dest="sub", required=True)
+    bll = blns.add_parser("list", parents=[parent], help="列出基线配置")
+    bll.add_argument("--search-text")
+    bll.add_argument("--page-number", type=int, default=1); bll.add_argument("--page-size", type=int, default=50)
+    bll.set_defaults(func=cmd_baseline_list)
+    bls = blns.add_parser("status", parents=[parent], help="某天各基线保障状态(--biz-date 必填)")
+    bls.add_argument("--biz-date", required=True, help="业务日期 YYYY-MM-DD")
+    bls.add_argument("--page-number", type=int, default=1); bls.add_argument("--page-size", type=int, default=50)
+    bls.set_defaults(func=cmd_baseline_status)
+
+    # quality 数据质量 DQC(只读)
+    qual = sub.add_parser("quality", help="数据质量 DQC(只读)")
+    quals = qual.add_subparsers(dest="sub", required=True)
+    qe = quals.add_parser("entity", parents=[parent], help="查表的质量实体")
+    qe.add_argument("--table", required=True, help="project.table,如 lyy_gz.ods_cpa_activity_order_hi")
+    qe.set_defaults(func=cmd_quality_entity)
+    qr = quals.add_parser("rules", parents=[parent], help="查实体的质量规则")
+    qr.add_argument("--entity-id", required=True, help="质量实体 ID(先 quality entity 查)")
+    qr.add_argument("--project-name", help="MaxCompute 项目名,如 lyy_gz")
+    qr.add_argument("--page-size", type=int, default=50)
+    qr.set_defaults(func=cmd_quality_rules)
+    qres = quals.add_parser("results", parents=[parent], help="查质量校验结果")
+    qres.add_argument("--rule-id", type=int, help="规则 ID")
+    qres.add_argument("--entity-id", type=int, help="实体 ID(与 --rule-id 二选一)")
+    qres.add_argument("--project-name", help="MaxCompute 项目名,如 lyy_gz")
+    qres.add_argument("--start-date", help="起始日期 YYYY-MM-DD")
+    qres.add_argument("--end-date", help="结束日期 YYYY-MM-DD")
+    qres.add_argument("--page-number", type=int, default=1); qres.add_argument("--page-size", type=int, default=50)
+    qres.set_defaults(func=cmd_quality_results)
+
     # instance
     inst = sub.add_parser("instance", help="实例运维")
     insts = inst.add_subparsers(dest="sub", required=True)
@@ -869,6 +1383,11 @@ def build_parser():
     il.add_argument("--begin-bizdate"); il.add_argument("--end-bizdate")
     il.add_argument("--page-size", type=int, default=100)
     il.set_defaults(func=cmd_instance_list)
+    istat = insts.add_parser("stat", parents=[parent], help="按业务日期统计实例状态分布与失败Top(--biz-date 必填)")
+    istat.add_argument("--biz-date", help="业务日期 YYYY-MM-DD(=begin=end)")
+    istat.add_argument("--begin-bizdate"); istat.add_argument("--end-bizdate")
+    istat.add_argument("--top", type=int, default=10, help="失败Top节点数,默认10")
+    istat.set_defaults(func=cmd_instance_stat)
     ig = insts.add_parser("get", parents=[parent], help="实例详情")
     ig.add_argument("--instance-id", required=True)
     ig.set_defaults(func=cmd_instance_get)
