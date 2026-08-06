@@ -1,6 +1,6 @@
-# AI Skills 集合
+# 数据分析 Skills 集合
 
-我的 Claude Code 自定义 skills,按 skill 分目录存放,每个目录自包含(含 `SKILL.md` 指令 + 脚本 + 文档)。
+按 skill 分目录存放,每个目录自包含(含 `SKILL.md` 指令 + 脚本 + 文档)。
 
 ## 目录
 
@@ -9,3 +9,5 @@
 ## 使用
 
 以 Claude Code 为例:把某个 skill 目录放到 `~/.claude/skills/<name>/`,即可被自动识别。每个 skill 的详细用法见其目录内 `README.md`。
+
+下载完SKILL后，请将SKILL目录下的`README.md`删掉，以避免干扰大模型，浪费不必要的token。claude code默认会读取skill目录下所有`md`文件（子目录按需加载）。
