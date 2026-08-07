@@ -36,7 +36,7 @@ python3 scripts/dwcli.py <子命令> <操作> --help   # 操作级,如 file crea
 | 用户意图 | 命令 | 备注 |
 |---|---|---|
 | 找/解析某任务 | `node resolve --name <任务名>` | `node list --name` 为**精确匹配**;名称不完整时用 `file list --keyword 关键字`(模糊包含) |
-| 查作业所在目录 | `file folder (--name <任务名> \| --file-id <id> \| --node-id <id>)` | 输出完整 FolderPath,如 `Business Flow/.../商创/python脚本`;`file list` 也带 file_folder_id/path |
+| 查作业所在目录 | `file folder (--name <任务名> \| --file-id <id> \| --node-id <id>)` | 输出完整 FolderPath,如 `Business Flow/.../dws`;`file list` 也带 file_folder_id/path |
 | 查上/下游节点 | `node parents \| node children (--node-id <id> \| --task-name <名>)` | 重跑/补数前评估影响面 |
 | 查节点代码 | `file get (--node-id <id> \| --file-id <id>) --format text` | `file list --keyword` 按关键字找 file_id |
 | 文件版本历史 | `file versions --file-id <id>`;取某版代码 `file version --file-id <id> --file-version <N> --format text` | 排查改动何时上线 |
@@ -83,6 +83,7 @@ python3 scripts/dwcli.py <子命令> <操作> --help   # 操作级,如 file crea
 2. **多工作空间防误操作**:操作前确认 `--project-id` 归属;跨空间的重跑/置成功/补数据不可逆。
 3. **取代码 ID**:优先用 `node resolve`/`file list` 返回的 ID;`node get` 的 `FileId` 与 `file list` 的 file_id 可能不同,不可混用。
 4. **全量遍历命令**:`instance stat`、`business files` 会分页遍历全量数据,较慢且可能触发限流(417 Throttling),已内置 0.2-0.3s/页退避;`instance stat` 仍必须带 `--biz-date`。
+5. **禁止删除作业**：所有作业删除动作必须人为手工提交。
 
 ## 写操作安全约定(重要)
 
