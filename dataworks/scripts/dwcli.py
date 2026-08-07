@@ -642,7 +642,13 @@ def apply_optional_file_fields(req, args):
     if args.connection:
         req.connection_name = args.connection
     if args.resource_group:
-        req.resource_group_identifier = args.resource_group
+        # 资源组映射:CreateFile 用数字 resource_group_id(int);UpdateFile 仅支持 resource_group_identifier(str)。
+        # 传数字(如 47500451)时映射到 resource_group_id,否则回退到 resource_group_identifier。
+        rg = str(args.resource_group).strip()
+        if rg.isdigit() and hasattr(req, "resource_group_id"):
+            req.resource_group_id = int(rg)
+        else:
+            req.resource_group_identifier = args.resource_group
     if args.para:
         req.para_value = args.para
     if args.input:
@@ -1381,7 +1387,7 @@ def build_parser():
     fc.add_argument("--content-file", help="节点代码文件路径")
     fc.add_argument("--content", help="节点代码字符串(与 --content-file 二选一)")
     fc.add_argument("--owner"); fc.add_argument("--description"); fc.add_argument("--connection")
-    fc.add_argument("--resource-group"); fc.add_argument("--para", help="调度参数,如 bizdate=$[yyyymmdd-1]")
+    fc.add_argument("--resource-group", help="资源组:传数字 ID(如 47500451),映射到 resource_group_id;传 UUID/标识符则映射到 resource_group_identifier"); fc.add_argument("--para", help="调度参数,如 bizdate=$[yyyymmdd-1]")
     fc.add_argument("--input", help="输入依赖 InputList,逗号分隔")
     fc.add_argument("--cron", help="定时 CronExpress,如 '00 05 00 * * ?'")
     fc.add_argument("--cycle-type", help="DAY / NOT_DAY")
@@ -1399,7 +1405,7 @@ def build_parser():
     fu.add_argument("--content-file", help="节点代码文件路径(不传则保留现有代码)")
     fu.add_argument("--content", help="节点代码字符串(与 --content-file 二选一;不传则保留现有代码)")
     fu.add_argument("--owner"); fu.add_argument("--description"); fu.add_argument("--connection")
-    fu.add_argument("--resource-group"); fu.add_argument("--para", help="调度参数,如 bizdate=$[yyyymmdd-1]")
+    fu.add_argument("--resource-group", help="资源组:UpdateFile 仅支持 resource_group_identifier(UUID/标识符)"); fu.add_argument("--para", help="调度参数,如 bizdate=$[yyyymmdd-1]")
     fu.add_argument("--input", help="输入依赖 InputList,逗号分隔")
     fu.add_argument("--cron", help="定时 CronExpress,如 '00 05 00 * * ?'")
     fu.add_argument("--cycle-type", help="DAY / NOT_DAY")
