@@ -46,7 +46,8 @@ python3 scripts/dwcli.py <子命令> <操作> --help   # 操作级,如 file crea
 | 实例按天统计 | `instance stat --biz-date <日期>` | 状态分布 + 失败 Top 节点,早上看失败任务 |
 | 查日志/找失败原因 | `instance log --instance-id <id> [--grep ERROR]` | 结合 `instance list --failed` |
 | 重跑/停止/置成功 | `instance restart/stop/set-success` | 写操作需 `--yes` |
-| 补数据 | `complement run --task-name <名> --start-biz <起> [--end-biz <止>] --yes` | 返回 `dag_id`,`complement status` 跟踪 |
+| 补数据(天) | `complement run --task-name <名> --start-biz <起> [--end-biz <止>] --yes` | 返回 `dag_id`,`complement status` 跟踪 |
+| 补数据(小时级) | `complement run --task-name <名> --data-date <YYYY-MM-DD> --hour <HH> --yes`(自动换算业务日期)或 `--start-biz <日> --begin-time HH:mm:ss --end-time HH:mm:ss` | **易踩坑**:小时任务 bizdate 比调度日早一天,补某日 HH 点分区建议用 `--data-date+--hour`;详见 pitfalls |
 | 业务流程 | `business list` / `business get --business-id <id>` / `business files --business-id <id>` | files 全量遍历匹配,较慢 |
 | 表结构/表血缘 | `meta table --table <project.table>` / `meta lineage --table <project.table> [--direction up\|down\|all]` | 数据地图;表名用 `lyy_gz.xxx` |
 | 资源组 | `resource list` | 合并调度+计算类型 |
@@ -66,6 +67,16 @@ python3 scripts/dwcli.py <子命令> <操作> --help   # 操作级,如 file crea
 ```
 `--type` 别名:`odps-sql`/`odps-mr`/`odps-script`/`di`/`shell`/`virtual`/`pyodps2`/`pyodps3`(或直接传数字编码)。详见 `file create --help`。
 
+### file update — 更新已有开发节点(写,需 `--yes`)
+
+```
+定位:--file-id <id> / --node-id <id> / --name <任务名>(三选一)
+改代码:--content-file <路径> 或 --content <字符串>;不传则保留现有代码(安全,不会清空)
+可同时改调度/依赖/重跑等可选字段(参数同 file create),如 --para、--cron、--cycle-type、--dep-nodes
+```
+
+**只改开发环境(DEV),需再 `file submit` + `file deploy` 才上线生产。**
+
 ## 关键约束(务必遵守)
 
 1. **`instance list` 必须限定范围**:加 `--biz-date <YYYY-MM-DD>`(或 `--status`/`--node-id`/`--dag-id`),否则拉全量历史且可能超时/失败。
@@ -75,7 +86,7 @@ python3 scripts/dwcli.py <子命令> <操作> --help   # 操作级,如 file crea
 
 ## 写操作安全约定(重要)
 
-`file create/submit/deploy`、`instance restart/stop/set-success`、`complement run` 均为写操作。
+`file create/update/submit/deploy`、`instance restart/stop/set-success`、`complement run` 均为写操作。
 **执行前必须先向用户复述将要执行的操作(对象、范围、影响),获得确认后才加 `--yes`**;可用 `--dry-run` 预览。补数据、重跑、置成功、发布尤其谨慎。
 
 ## 排错要点
@@ -84,9 +95,12 @@ python3 scripts/dwcli.py <子命令> <操作> --help   # 操作级,如 file crea
 |---|---|
 | 鉴权失败(退出码 3) | 凭证用 `DATAWORKS_ACCESS_KEY_ID/SECRET`(或 `ALIBABA_CLOUD_ACCESS_KEY_*`)或技能目录 `.env`;`doctor` 自检 |
 | 查不到数据 | 确认 `--env`(PROD/DEV)与业务日期;`--debug` 看实际请求 |
+| `node list --name` 搜不到 | OpenAPI ListNodes 的 name 是**精确匹配**非包含;模糊搜作业名改用 `file list --keyword` |
 | `baseline status` 报 bizdate pattern 错误 | CLI 已内部把 `--biz-date YYYY-MM-DD` 转 `yyyy-MM-ddTHH:mm:ss+0800`(RFC822 时区,网关正则要求);勿手动传字面 `Z` |
 | `quality entity` 返回空 | 该工作空间未配置 DQC 质量实体,需先在 DataWorks「数据质量」模块为表建实体/规则 |
 | 限流 417 Throttling.User | 连续快速调用触发,稍后重试;全量遍历命令已内置退避 |
+| 补数到小时级但检查错分区 | 小时任务实例 bizdate 比调度日早一天(`dt=cyc-1h`):补"某日 HH 点分区"应传 **业务日期=该日前一天**;CLI 提供 `--data-date+--hour` 自动换算(见 pitfalls) |
+| 补数报"小时分钟参数格式不正确" | 时间参数需为 `HH:mm:ss`;传完整时间戳也会被自动截取时间部分;`begin` 必须早于 `end` |
 | 结果与预期不符 | 先 `instance list --failed` + `instance log` 分析根因,再决定是否重跑/置成功 |
 
 ## 参考文档(按需读取)

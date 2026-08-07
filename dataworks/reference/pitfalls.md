@@ -39,6 +39,25 @@
 3. 分析根因:SQL 语法错误 / 资源不足(OOM)/ 上游未完成 / 权限不足 / 数据质量问题。
 4. 修复后 `instance restart`;确认可忽略则 `instance set-success`。
 
+## 补数据到小时级(重点)
+
+小时任务补数最容易"补错分区",核心是 **bizdate 与调度日的映射**:
+
+- **规律(实测)**:DataWorks 小时任务实例,业务日期 `D` 的实例,**实际调度时间 cyc 在 `D+1`**,而 `dt = cyc - 1 小时`。
+  - 例:补 `--start-biz 2026-08-01` 后,实例 cyc=`2026-08-02 12:05`、`dt=2026080211`(**检查的是 08-02 11 点分区**,不是 08-01!)。日志里看 `SKYNET_BIZDATE`(业务日期)与 `SKYNET_CYCTIME`(调度时间)即可确认。
+- **要补"某日 HH 点数据分区 dt=YYYYMMDDHH"** → 业务日期应传 **该日前一天**,时间范围覆盖调度 `(H+1):05`:
+  - 例:补 `dt=2026080111`(08-01 11 点)→ 业务日期 `2026-07-31`、时间 `12:00:00~12:59:59`。
+- **推荐直接让 CLI 换算**:`complement run --task-name <名> --data-date 2026-08-01 --hour 11 --yes`,CLI 自动算成业务日期 07-31 + 时间 12:00:00~12:59:59 并打印换算明细。
+- **时间参数格式**:`--begin-time` / `--end-time` 需为 `HH:mm:ss`(如 `12:00:00`、`12:59:59`);`begin` 必须早于 `end`,否则报"时间区间为空"。
+- **parallelism 是 bool 且必填**:RunCycleDagNodes 的 `Parallelism` 传数值/字符串均报 `InvalidParallelism`,CLI 已内置为 `True`,无需也不能手动传值。
+
+## file update 与提交发布
+
+- `file update` 只改**开发环境(DEV)**代码/调度配置;生产不受影响。
+- 上线顺序:`file update` → `file submit` → `file deploy`。
+- `file update` 不传 `--content`/`--content-file` 时**自动保留现有代码**,可单独改调度参数(如 `--para`),不会清空代码。
+- 更新后可用 `file get --node-id <id> --format text --env PROD` 核对生产是否已生效。
+
 ## 其他
 
 - 退出码:3 = 鉴权失败(检查 AccessKey)、5 = 无权限(需授权)、6 = SDK 未安装(`pip install -r requirements.txt`)。

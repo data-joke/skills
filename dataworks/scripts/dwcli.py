@@ -633,6 +633,77 @@ def cmd_file_get(ctx, args):
     out(ctx, body)
 
 
+def apply_optional_file_fields(req, args):
+    """CreateFile/UpdateFile 共用的可选字段(owner/描述/连接/资源组/调度/重跑/依赖)。"""
+    if args.owner:
+        req.owner = args.owner
+    if args.description:
+        req.file_description = args.description
+    if args.connection:
+        req.connection_name = args.connection
+    if args.resource_group:
+        req.resource_group_identifier = args.resource_group
+    if args.para:
+        req.para_value = args.para
+    if args.input:
+        req.input_list = args.input
+    if args.cron:
+        req.cron_express = args.cron
+    if args.cycle_type:
+        req.cycle_type = args.cycle_type
+    if args.start_effect:
+        req.start_effect_date = to_epoch_ms(args.start_effect)
+    if args.end_effect:
+        req.end_effect_date = to_epoch_ms(args.end_effect)
+    if args.rerun_mode:
+        req.rerun_mode = args.rerun_mode
+    if args.auto_rerun_times is not None:
+        req.auto_rerun_times = args.auto_rerun_times
+    if args.auto_rerun_interval is not None:
+        req.auto_rerun_interval_millis = args.auto_rerun_interval
+    if args.dep_type:
+        req.dependent_type = args.dep_type
+    if args.dep_nodes:
+        req.dependent_node_id_list = args.dep_nodes
+
+
+def cmd_file_update(ctx, args):
+    """更新已有开发节点(代码/调度配置)。通过 --file-id/--node-id/--name 定位。仅改 DEV,不发布。"""
+    pid = need_project(ctx)
+    file_id, node_id = args.file_id, args.node_id
+    if args.name and not file_id and not node_id:
+        node = resolve_single_node(ctx, args.name)
+        node_id = node.get("node_id")
+        file_id = node.get("file_id")
+    if not file_id and node_id:
+        greq = dw_models.GetFileRequest(project_id=pid, node_id=int(node_id))
+        body = call(ctx, "get_file", greq)
+        file_id = g(body, "Data", "File", "FileId")
+    if not file_id:
+        die("file update 需要 --file-id、--node-id 或 --name。", E_USAGE)
+    file_id = int(file_id)
+
+    content = args.content
+    if args.content_file:
+        with open(args.content_file, encoding="utf-8") as f:
+            content = f.read()
+    if content is None:
+        # 未提供代码时读取现有内容,避免更新调度配置时把代码清空
+        greq = dw_models.GetFileRequest(project_id=pid, file_id=file_id)
+        body = call(ctx, "get_file", greq)
+        content = g(body, "Data", "File", "Content")
+    if content is None:
+        die("无法取得节点代码:请提供 --content-file 或 --content。", E_USAGE)
+
+    req = dw_models.UpdateFileRequest(project_id=pid, file_id=file_id, content=content)
+    apply_optional_file_fields(req, args)
+
+    confirm_write(ctx, "UpdateFile", req.to_map())
+    body = call(ctx, "update_file", req)
+    eprint("[info] 已更新开发环境(DEV);生产未变更,如需上线请继续 `file submit` + `file deploy`。")
+    out(ctx, {"file_id": file_id, "node_id": node_id, "result": body})
+
+
 def cmd_file_create(ctx, args):
     pid = need_project(ctx)
     ftype = resolve_file_type(args.type)
@@ -649,39 +720,7 @@ def cmd_file_create(ctx, args):
         project_id=pid, file_name=args.name, file_type=ftype,
         file_folder_path=args.folder, content=content,
     )
-    if args.owner:
-        req.owner = args.owner
-    if args.description:
-        req.file_description = args.description
-    if args.connection:
-        req.connection_name = args.connection
-    if args.resource_group:
-        req.resource_group_identifier = args.resource_group
-    if args.para:
-        req.para_value = args.para
-    if args.input:
-        req.input_list = args.input
-    # 调度
-    if args.cron:
-        req.cron_express = args.cron
-    if args.cycle_type:
-        req.cycle_type = args.cycle_type
-    if args.start_effect:
-        req.start_effect_date = to_epoch_ms(args.start_effect)
-    if args.end_effect:
-        req.end_effect_date = to_epoch_ms(args.end_effect)
-    # 重跑
-    if args.rerun_mode:
-        req.rerun_mode = args.rerun_mode
-    if args.auto_rerun_times is not None:
-        req.auto_rerun_times = args.auto_rerun_times
-    if args.auto_rerun_interval is not None:
-        req.auto_rerun_interval_millis = args.auto_rerun_interval
-    # 依赖
-    if args.dep_type:
-        req.dependent_type = args.dep_type
-    if args.dep_nodes:
-        req.dependent_node_id_list = args.dep_nodes
+    apply_optional_file_fields(req, args)
     if args.create_folder:
         req.create_folder_if_not_exists = True
 
@@ -1120,6 +1159,22 @@ def cmd_instance_set_success(ctx, args):
     _write_instance_op(ctx, args, "FAILURE", "SetSuccessInstance", "SetSuccessInstanceRequest", "set_success_instance")
 
 
+def norm_time_range(begin_t, end_t):
+    """小时级补数时间范围 → (begin, end)。格式 HH:mm:ss;也兼容 yyyy-MM-dd HH:mm:ss(自动取时间部分)。"""
+    outs = []
+    for v in (begin_t, end_t):
+        if not re.match(r"^\d{2}:\d{2}:\d{2}$", v):
+            m2 = re.match(r"^\d{4}-\d{2}-\d{2}[T ](\d{2}:\d{2}:\d{2})$", v)
+            if not m2:
+                die(f"时间格式需为 HH:mm:ss(收到: {v})。", E_USAGE)
+            v = m2.group(1)
+        outs.append(v)
+    begin, end = outs
+    if begin >= end:
+        die(f"--begin-time({begin}) 需早于 --end-time({end}),否则时间区间为空、无法匹配任何实例。", E_USAGE)
+    return begin, end
+
+
 def cmd_complement_run(ctx, args):
     # 解析目标节点
     if args.task_name:
@@ -1134,10 +1189,42 @@ def cmd_complement_run(ctx, args):
     else:
         die("complement run 需要 --task-name 或 --root-node-id。", E_USAGE)
 
-    start = norm_biz_datetime(args.start_biz)
-    end = norm_biz_datetime(args.end_biz) or start
-    if not start:
-        die("complement run 需要 --start-biz(YYYY-MM-DD)。", E_USAGE)
+    start = end = None
+    begin_time = end_time = None
+
+    # 语义补数:--data-date + --hour = 想检查"某日某小时"的数据分区
+    if args.data_date or args.hour is not None:
+        if args.start_biz:
+            die("--data-date/--hour 与 --start-biz 互斥,请选一种语义。", E_USAGE)
+        if not args.data_date or args.hour is None:
+            die("--data-date 与 --hour 需同时提供。", E_USAGE)
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", str(args.data_date)):
+            die(f"--data-date 需为 YYYY-MM-DD: {args.data_date}", E_USAGE)
+        if not 0 <= args.hour <= 23:
+            die(f"--hour 需为 0-23: {args.hour}", E_USAGE)
+        dd = datetime.datetime.strptime(args.data_date, "%Y-%m-%d")
+        # 该任务规律:实例 cyc = bizdate + 1,dt = cyc - 1 小时;
+        # 要检查数据分区 dt=YYYYMMDDHH → 调度 (H+1):05 的实例 → bizdate = 数据日期 - 1。
+        biz = dd - datetime.timedelta(days=1)
+        check_h = args.hour + 1
+        start = end = biz.strftime("%Y-%m-%d 00:00:00")
+        begin_time = f"{check_h:02d}:00:00"
+        end_time = f"{check_h:02d}:59:59"
+        eprint(
+            f"[info] 换算(适用\"每小时 HH:05 调度、检查前一小时分区\"的任务): "
+            f"数据分区 dt={args.data_date.replace('-', '')}{args.hour:02d} → "
+            f"业务日期 {biz.strftime('%Y-%m-%d')} + 时间 {begin_time}~{end_time}(调度 {check_h:02d}:05)"
+        )
+    else:
+        start = norm_biz_datetime(args.start_biz)
+        end = norm_biz_datetime(args.end_biz) or start
+        if not start:
+            die("complement run 需要 --start-biz(YYYY-MM-DD)或 --data-date+--hour。", E_USAGE)
+        if args.begin_time or args.end_time:
+            if not (args.begin_time and args.end_time):
+                die("--begin-time 与 --end-time 需同时提供。", E_USAGE)
+            begin_time, end_time = norm_time_range(args.begin_time, args.end_time)
+
     name = args.name or f"dwcli-backfill-{node_id}-{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
 
     req = dw_models.RunCycleDagNodesRequest(
@@ -1146,14 +1233,19 @@ def cmd_complement_run(ctx, args):
     )
     if args.exclude_node_ids:
         req.exclude_node_ids = args.exclude_node_ids
-    if args.parallelism is not None:
-        req.parallelism = args.parallelism
+    if begin_time:
+        req.biz_begin_time = begin_time
+        req.biz_end_time = end_time
+    # RunCycleDagNodes 的 parallelism 为 bool 且必填(开启并行补数);见实测
+    req.parallelism = True
     if args.node_params:
         req.node_params = args.node_params
 
     confirm_write(ctx, "RunCycleDagNodes", req.to_map())
     body = call(ctx, "run_cycle_dag_nodes", req)
-    out(ctx, {"dag_id": g(body, "Data"), "name": name, "raw": body})
+    dag_id = g(body, "Data")
+    eprint(f"[info] 补数已发起(dag_id={dag_id}),跟踪进度: complement status --dag-id {dag_id}")
+    out(ctx, {"dag_id": dag_id, "name": name, "raw": body})
 
 
 def cmd_complement_status(ctx, args):
@@ -1302,6 +1394,23 @@ def build_parser():
     fc.add_argument("--dep-nodes", help="依赖节点 ID 列表")
     fc.add_argument("--create-folder", action="store_true", help="目录不存在时自动创建")
     fc.set_defaults(func=cmd_file_create)
+    fu = files.add_parser("update", parents=[parent], help="更新开发节点代码/调度配置(写,需 --yes)")
+    fu.add_argument("--file-id"); fu.add_argument("--node-id"); fu.add_argument("--name", help="按任务名解析定位")
+    fu.add_argument("--content-file", help="节点代码文件路径(不传则保留现有代码)")
+    fu.add_argument("--content", help="节点代码字符串(与 --content-file 二选一;不传则保留现有代码)")
+    fu.add_argument("--owner"); fu.add_argument("--description"); fu.add_argument("--connection")
+    fu.add_argument("--resource-group"); fu.add_argument("--para", help="调度参数,如 bizdate=$[yyyymmdd-1]")
+    fu.add_argument("--input", help="输入依赖 InputList,逗号分隔")
+    fu.add_argument("--cron", help="定时 CronExpress,如 '00 05 00 * * ?'")
+    fu.add_argument("--cycle-type", help="DAY / NOT_DAY")
+    fu.add_argument("--start-effect", help="调度生效起(YYYY-MM-DD 或 epoch 毫秒)")
+    fu.add_argument("--end-effect", help="调度生效止")
+    fu.add_argument("--rerun-mode", help="ALL_ALLOWED / FAILURE_ALLOWED / ALL_DENIED")
+    fu.add_argument("--auto-rerun-times", type=int, help="自动重跑次数")
+    fu.add_argument("--auto-rerun-interval", type=int, help="自动重跑间隔(毫秒)")
+    fu.add_argument("--dep-type", help="依赖类型")
+    fu.add_argument("--dep-nodes", help="依赖节点 ID 列表")
+    fu.set_defaults(func=cmd_file_update)
     fs = files.add_parser("submit", parents=[parent], help="提交文件(写,需 --yes)")
     fs.add_argument("--file-id", required=True); fs.add_argument("--comment")
     fs.set_defaults(func=cmd_file_submit)
@@ -1412,10 +1521,13 @@ def build_parser():
     cr = comps.add_parser("run", parents=[parent], help="发起补数据(写,需 --yes)")
     cr.add_argument("--task-name", help="按任务名解析节点")
     cr.add_argument("--root-node-id"); cr.add_argument("--include-node-ids"); cr.add_argument("--exclude-node-ids")
-    cr.add_argument("--start-biz", help="起始业务日期 YYYY-MM-DD(必填)")
+    cr.add_argument("--start-biz", help="起始业务日期 YYYY-MM-DD(--data-date 未给时必填)")
     cr.add_argument("--end-biz", help="结束业务日期 YYYY-MM-DD(默认=start)")
     cr.add_argument("--name", help="补数据任务名")
-    cr.add_argument("--parallelism", type=int)
+    cr.add_argument("--begin-time", help="小时级补数:业务时间起 HH:mm:ss(如 12:00:00)")
+    cr.add_argument("--end-time", help="小时级补数:业务时间止 HH:mm:ss(如 12:59:59)")
+    cr.add_argument("--data-date", help="语义补数:要检查的数据日期 YYYY-MM-DD(自动换算业务日期=前一天)")
+    cr.add_argument("--hour", type=int, help="语义补数:要检查的数据小时 HH(0-23),配合 --data-date")
     cr.add_argument("--node-params", help="节点参数 JSON 串")
     cr.set_defaults(func=cmd_complement_run)
     cs = comps.add_parser("status", parents=[parent], help="补数据 DAG 进度")
