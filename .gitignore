@@ -13,6 +13,5 @@ __pycache__/
 
 # ---- 暂未发布的 skill(发布时从本清单移除对应目录后 add)----
 write-article/
-github/
 llm-gateway-model/
 mmx-cli
