@@ -1,0 +1,7 @@
+{
+  "_comment": "图标生成 API 配置模板。复制本文件并重命名为 icon_config.json？不需要！配置文件应放在 ~/.vba-dev/icon_config.json（skill 目录外，发布安全），由 set_icon_config() 自动创建，无需手工复制本文件。本模板仅说明字段含义。api_key 建议用环境变量 ICON_API_KEY 代替写入文件。",
+  "provider": "openai-compatible",
+  "base_url": "https://your-gateway.example/v1",
+  "model": "gpt-image-1",
+  "api_key": "sk-xxxxxxxx"
+}
