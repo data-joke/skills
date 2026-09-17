@@ -616,6 +616,235 @@ class TestPackXlam(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 2026-09 五视角审查修复的回归测试
+# ---------------------------------------------------------------------------
+
+class TestXmlEscaping(unittest.TestCase):
+    """generate_button_xml / generate_group_xml 属性转义——label 含 & 或 "
+    曾产出非法 customUI.xml，Excel 拒载整个功能区（三个审查视角独立发现）。"""
+
+    def test_button_label_escaped(self):
+        from xlam_toolkit import generate_button_xml
+        xml = generate_button_xml("b1", '复制 & 粘贴"全部', "My_Click")
+        self.assertIn("&amp;", xml)
+        self.assertIn("&quot;", xml)
+        # 转义后不应存在裸 &（所有 & 都必须是实体起始）
+        import re
+        for m in re.finditer(r"&(?!amp;|lt;|gt;|quot;|apos;|#)", xml):
+            self.fail(f"未转义的 & at {m.start()}: {xml}")
+
+    def test_group_label_escaped(self):
+        from xlam_toolkit import generate_group_xml
+        xml = generate_group_xml("g1", "AT&T 工具", [])
+        self.assertIn("AT&amp;T", xml)
+
+    def test_plain_values_unchanged(self):
+        from xlam_toolkit import generate_button_xml
+        xml = generate_button_xml("b1", "普通按钮", "My_Click", screentip="提示")
+        self.assertIn('label="普通按钮"', xml)
+
+
+class TestProcTypeOfDecl(unittest.TestCase):
+    """list_procedures 曾用 startswith 把 'Public Function ...' 全部误判为 Sub。"""
+
+    def test_public_function(self):
+        from xlam_toolkit import _proc_type_of_decl
+        self.assertEqual(
+            _proc_type_of_decl("Public Function AddTwo(a, b) As Long"), "Function")
+
+    def test_private_property_get(self):
+        from xlam_toolkit import _proc_type_of_decl
+        self.assertEqual(
+            _proc_type_of_decl("Private Property Get Name() As String"), "Property")
+
+    def test_static_sub(self):
+        from xlam_toolkit import _proc_type_of_decl
+        self.assertEqual(_proc_type_of_decl("Static Sub Tick()"), "Sub")
+
+    def test_bare_function(self):
+        from xlam_toolkit import _proc_type_of_decl
+        self.assertEqual(_proc_type_of_decl("Function F() As Long"), "Function")
+
+    def test_unknown_falls_back_to_sub(self):
+        from xlam_toolkit import _proc_type_of_decl
+        self.assertEqual(_proc_type_of_decl("' comment"), "Sub")
+
+
+class TestProcDeclReBoundary(unittest.TestCase):
+    """add_form_event_handler 判重曾用裸子串：已存在 btnOK_Click2 时
+    btnOK_Click 被误判"已存在"而静默跳过，事件永不触发。"""
+
+    def test_no_false_positive_on_longer_name(self):
+        from xlam_toolkit import _proc_decl_re
+        code = "Private Sub btnOK_Click2()\nEnd Sub\n"
+        self.assertIsNone(_proc_decl_re("btnOK_Click").search(code))
+
+    def test_matches_with_modifiers(self):
+        from xlam_toolkit import _proc_decl_re
+        code = "Private Sub btnOK_Click()\nEnd Sub\n"
+        self.assertIsNotNone(_proc_decl_re("btnOK_Click").search(code))
+
+    def test_not_matching_comment_mention(self):
+        from xlam_toolkit import _proc_decl_re
+        code = "' TODO: wire btnOK_Click later\nSub Other()\nEnd Sub\n"
+        self.assertIsNone(_proc_decl_re("btnOK_Click").search(code))
+
+
+class TestFormInitHandler(unittest.TestCase):
+    """曾生成 '{form_name}_Initialize'——UserForm 的 Initialize 事件过程名
+    固定为 UserForm_Initialize（与窗体名无关），带窗体名的版本是永不触发
+    的死代码。"""
+
+    def test_fixed_event_name(self):
+        from xlam_toolkit import generate_form_init_handler
+        code = generate_form_init_handler("frmMain")
+        self.assertIn("Private Sub UserForm_Initialize()", code)
+        self.assertNotIn("frmMain_Initialize", code)
+
+    def test_additem_via_me(self):
+        from xlam_toolkit import generate_form_init_handler
+        code = generate_form_init_handler(
+            "frmMain", {"cmbType": {"AddItem": ["a", "b"]}})
+        self.assertIn('Me.cmbType.AddItem "a"', code)
+
+
+class TestMotwGate(unittest.TestCase):
+    """带 Zone.Identifier（网络下载标记）的文件拒绝以宏启用方式打开——
+    隔离实例不是沙箱，Workbook_Open/Auto_Open 以用户完整权限执行。"""
+
+    def _touch(self, d, name="book.xlsm"):
+        p = os.path.join(d, name)
+        with open(p, "wb") as f:
+            f.write(b"PK\x03\x04")
+        return p
+
+    def test_no_marker_passes(self):
+        import tempfile
+        from xlam_toolkit import _has_mark_of_the_web, _refuse_untrusted
+        with tempfile.TemporaryDirectory() as d:
+            p = self._touch(d)
+            self.assertFalse(_has_mark_of_the_web(p))
+            _refuse_untrusted(p)  # 不抛即通过
+
+    def test_marker_refused_then_trusted_ok(self):
+        import tempfile
+        from xlam_toolkit import _has_mark_of_the_web, _refuse_untrusted
+        with tempfile.TemporaryDirectory() as d:
+            p = self._touch(d)
+            with open(p + ":Zone.Identifier", "w") as f:
+                f.write("[ZoneTransfer]\nZoneId=3\n")
+            self.assertTrue(_has_mark_of_the_web(p))
+            with self.assertRaises(ValueError):
+                _refuse_untrusted(p)
+            _refuse_untrusted(p, assume_trusted=True)  # 显式信任放行
+
+    def test_missing_file_no_marker(self):
+        from xlam_toolkit import _has_mark_of_the_web
+        self.assertFalse(_has_mark_of_the_web(r"C:\__no_such_file__.xlsm"))
+
+
+class TestUnpackGuard(unittest.TestCase):
+    """unpack_xlam 曾对已存在目录无条件 rmtree——误传父目录即整目录销毁。
+    护栏：只清空含 [Content_Types].xml 的解包产物或空目录。"""
+
+    def _zip(self, path):
+        import zipfile
+        with zipfile.ZipFile(path, "w") as z:
+            z.writestr("[Content_Types].xml", "<Types/>")
+            z.writestr("xl/workbook.xml", "<wb/>")
+
+    def test_refuses_foreign_dir(self):
+        import tempfile
+        from xlam_toolkit import unpack_xlam
+        with tempfile.TemporaryDirectory() as d:
+            victim = os.path.join(d, "victim")
+            os.makedirs(victim)
+            with open(os.path.join(victim, "keepme.txt"), "w") as f:
+                f.write("data")
+            z = os.path.join(d, "src.xlam")
+            self._zip(z)
+            with self.assertRaises(ValueError):
+                unpack_xlam(z, victim)
+            # 目录原样保留，未被清空
+            self.assertTrue(os.path.exists(os.path.join(victim, "keepme.txt")))
+
+    def test_allows_empty_and_unpack_dirs(self):
+        import tempfile
+        from xlam_toolkit import unpack_xlam
+        with tempfile.TemporaryDirectory() as d:
+            z = os.path.join(d, "src.xlam")
+            self._zip(z)
+            # 空目录放行（mkdtemp 预建目录场景，render_ribbon_preview 内部用）
+            empty = os.path.join(d, "empty")
+            os.makedirs(empty)
+            unpack_xlam(z, empty)
+            self.assertTrue(
+                os.path.exists(os.path.join(empty, "[Content_Types].xml")))
+            # 已是解包产物（重复解包）放行
+            unpack_xlam(z, empty)
+
+
+class TestPackBackupOnOverwrite(unittest.TestCase):
+    """pack_xlam 覆盖已有输出曾直接 os.remove 无备份，与模块头部
+    "Every write operation backs the file up" 的宣称不符。"""
+
+    def test_existing_output_backed_up(self):
+        import tempfile
+        from xlam_toolkit import pack_xlam, list_backups
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "pkg")
+            os.makedirs(os.path.join(src, "customUI"), exist_ok=True)
+            with open(os.path.join(src, "customUI", "customUI.xml"), "w",
+                      encoding="utf-8") as f:
+                f.write("<customUI/>")
+            with open(os.path.join(src, "[Content_Types].xml"), "w",
+                      encoding="utf-8") as f:
+                f.write("<Types/>")
+            out = os.path.join(d, "out.xlam")
+            with open(out, "wb") as f:
+                f.write(b"OLD-CONTENT")
+            pack_xlam(src, out)
+            self.assertTrue(list_backups(out))  # 旧内容进了备份目录
+            bak = os.path.join(out + ".bak", list_backups(out)[0])
+            with open(bak, "rb") as f:
+                self.assertEqual(f.read(), b"OLD-CONTENT")
+
+
+class TestButtonIdDedup(unittest.TestCase):
+    """add_button_to_ribbon 曾不查重 id——AI 重试追加同 id 按钮后产出
+    重复 id 的 customUI，Excel 拒载整个功能区。"""
+
+    def _dir(self, d):
+        os.makedirs(os.path.join(d, "customUI"), exist_ok=True)
+        with open(os.path.join(d, "customUI", "customUI.xml"), "w",
+                  encoding="utf-8") as f:
+            f.write('<customUI><ribbon><tabs><tab id="tabCustom">'
+                    '<group id="grp"><button id="b1" label="old"/>'
+                    '</group></tab></tabs></ribbon></customUI>')
+        return d
+
+    def test_duplicate_id_skipped(self):
+        import tempfile
+        from xlam_toolkit import add_button_to_ribbon, get_ribbon_xml
+        with tempfile.TemporaryDirectory() as d:
+            self._dir(d)
+            add_button_to_ribbon(d, "grp", '<button id="b1" label="new"/>')
+            xml = get_ribbon_xml(d)
+            self.assertEqual(xml.count('id="b1"'), 1)
+            self.assertNotIn('label="new"', xml)
+
+    def test_new_id_appended(self):
+        import tempfile
+        from xlam_toolkit import add_button_to_ribbon, get_ribbon_xml
+        with tempfile.TemporaryDirectory() as d:
+            self._dir(d)
+            add_button_to_ribbon(d, "grp", '<button id="b2" label="second"/>')
+            xml = get_ribbon_xml(d)
+            self.assertEqual(xml.count('id="b1"'), 1)
+            self.assertEqual(xml.count('id="b2"'), 1)
+
+
+# ---------------------------------------------------------------------------
 # 端到端（需 Excel，默认跳过）
 # ---------------------------------------------------------------------------
 @unittest.skipUnless(os.environ.get("VBA_DEV_EXCEL_TESTS") == "1",
@@ -688,6 +917,45 @@ class TestExcelEndToEnd(unittest.TestCase):
             self.assertFalse(res["ok"])
             self.assertTrue(comp.get("error_text") or comp.get("timed_out"),
                             f"应带错误文本: {comp}")
+
+    # --- run_test(keep=True)：曾走 write 模式在 OPEN 前强禁宏必败 ------------
+    def test_run_test_keep_true_runs_and_saves(self):
+        import tempfile
+        import xlam_toolkit as xt
+        with tempfile.TemporaryDirectory() as d:
+            p = self._make_addin(
+                d,
+                "Public Function Ping() As String\n"
+                "    Ping = \"pong\"\n"
+                "End Function")
+            r = xt.run_test(
+                p,
+                "Public Function RunTest() As String\n"
+                "    RunTest = \"k=\" & Ping()\n"
+                "End Function",
+                keep=True)
+            self.assertTrue(r["ok"], f"keep=True 应能执行: {r['error']}")
+            self.assertEqual(r["result"], "k=pong")
+            # keep=True 保存了注入模块（此前 write 模式下 Run 必报"宏被禁用"）
+            code = xt.read_vba_module(p, r["module"])
+            self.assertIn("RunTest", code)
+
+    def test_run_test_default_leaves_file_unchanged(self):
+        import tempfile
+        import xlam_toolkit as xt
+        with tempfile.TemporaryDirectory() as d:
+            p = self._make_addin(
+                d,
+                "Public Function Ping() As String\n"
+                "    Ping = \"pong\"\n"
+                "End Function")
+            r = xt.run_test(p, "Public Function RunTest() As String\n"
+                               "    RunTest = \"k=\" & Ping()\n"
+                               "End Function")
+            self.assertTrue(r["ok"], r["error"])
+            self.assertEqual(r["result"], "k=pong")
+            # 默认 keep=False：注入模块跑完即删，文件不含测试模块
+            self.assertNotIn("RunTest", xt.read_vba_module(p, "modSmoke"))
 
     def tearDown(self):
         import xlam_toolkit as xt

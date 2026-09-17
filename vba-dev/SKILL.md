@@ -1,16 +1,16 @@
 ---
 name: vba-dev
-description: "开发与修改 Excel 插件/加载项及宏工作簿（.xlam / .xlsm）：编写 VBA 模块与回调、定制功能区（Ribbon / customUI）、加图标、创建用户窗体，并在隔离的 Excel 实例中做真实编译验证与运行测试。当用户要做 Excel 插件/加载项、给插件加按钮或功能区、写/改/调试 VBA 宏代码、加图标或窗体、或升级已安装的插件（文件被锁无法直接修改）时使用。"
+description: "开发与修改 Excel 插件/加载项及宏工作簿（.xlam / .xlsm）：编写 VBA 模块与回调、定制功能区（Ribbon / customUI）、加图标、创建用户窗体，并在隔离的 Excel 实例中做真实编译验证与运行测试。当用户要做 Excel 插件/加载项、给插件加按钮或功能区、写/改/调试 VBA 宏代码、加图标或窗体、或升级已安装的插件（文件被锁无法直接修改）时使用。仅限 Windows + 桌面版 Excel（依赖 COM 自动化，macOS/Linux 不可用）；若只需读写/排版 Excel 数据表（不涉及 VBA/插件/宏），应使用 xlsx skill。"
 ---
 
-# VBA 开发技能 - Excel 文件操作
+# VBA 开发技能 - Excel 插件与宏开发
 
 ## 能力总览（签名/参数/返回值查 `references/function-reference.md`）
 
 - **环境**：`check_environment` / `enable_vba_trust` / `shutdown_excel`
 - **源码同步**：`create_addin`（0→1 空 `.xlam`）；`export_vba_source` / `import_vba_source`（VBA ↔ .bas/.cls，AI 编辑源码主通道）
-- **验证**：`build_check`（静态+真编译）；`run_macro` / `run_test`（注入临时宏，文件不变）
-- **VBA/窗体**：`add_vba_module` 等 13 个过程级函数；`create_userform` / `lint_form`
+- **验证**：`build_check`（静态+真编译）；`run_macro`（跑已有宏，save=True 时保存）/ `run_test`（注入临时宏，默认跑完即删、文件不变）
+- **VBA/窗体**：共 13 个过程级函数（`add_vba_module` 等，清单见 `references/function-reference.md`）；`create_userform` / `lint_form`
 - **Ribbon**：customUI 全链路 + `render_ribbon_preview`（装进 Excel 前唯一可见的验收材料）
 - **备份/升级/偏好**：写操作自动备份、`restore_backup` 回滚；已装插件升级见「升级工作流」；`get_preferences` / `set_preference`
 
@@ -41,6 +41,7 @@ run_test("MyTools.xlam", TEST_CODE)
 ## 安全机制（务必了解）
 
 - **独立 Excel 实例**：COM 全在 `DispatchEx` 后台 Excel 中进行，**绝不动用户打开的 Excel**；`attach=True` 可显式复用用户实例，但**永不 Quit、永不强杀用户 Excel**
+- **不可信文件红线**：来源不明（网络下载/他人发送）的工作簿只允许 `build_check(compile=False)` 纯静态检查——`run_macro`/`run_test`/真实编译都以**宏启用**方式打开文件，打开瞬间 `Workbook_Open`/`Auto_Open` 将以用户完整权限执行（**隔离实例不是沙箱**）。工具已内置 Mark-of-the-Web 拦截（带下载标记的文件会被拒绝），确属可信时传 `assume_trusted=True`；先 `export_vba_source` 导出源码审阅再决定
 - **自动备份**：所有写操作前自动备份；`restore_backup()` 恢复（恢复前也先备份当前状态，可逆）
 - **弹窗看门狗**：模态弹窗（MsgBox/编译错/运行时错）自动关闭、错误文本完整捕获——VBA 运行时错误的 `com_error` 本身不带描述，**真实错误信息在结果 dict 的 `error`/`dialogs` 字段里**
 - **卡死保护 + 失败原子性**：宏卡死超 `timeout` 秒或弹窗风暴时强杀**本工具的隔离实例**并报告（不影响用户 Excel）；写操作中途抛异常则不保存关闭，文件保持原状
@@ -104,7 +105,8 @@ from xlam_toolkit import (
 export_vba_source("DataJoke.xlsm")          # -> ./DataJoke_vba/modMain.bas 等
 
 # 2. 用 Read/Edit/Write 直接编辑导出的 .bas/.cls 文件
-#    （UTF-8 编码，中文注释往返安全；.frm 是窗体二进制，只读不动；
+#    （UTF-8 编码，中文注释往返安全；.frm 是文本格式但伴生 .frx 是二进制，
+#     手改有 frx 失同步风险——窗体一律只读不动，改动走 COM API；
 #     文档模块 Sheet1/ThisWorkbook.cls 可改代码）
 
 # 3. 导回（写前自动备份；sync=True 删除工作簿里有但源码目录没有的模块/类/窗体）
@@ -132,14 +134,14 @@ End Function
 ## 快速路径与运行（单点小改 / 跑宏 / 冒烟）
 
 ```python
-add_vba_module("D.xlsm", "modF", CODE)      # 免导出单点编辑；另有 update_vba_callback /
-read_vba_module("D.xlsm", "modF")           # replace_vba_lines / list_procedures 等 13 个（见 function-reference）
+add_vba_module("D.xlsm", "modF", CODE)      # 免导出单点编辑；过程级函数共 13 个
+read_vba_module("D.xlsm", "modF")           # （update_vba_callback / replace_vba_lines / list_procedures 等，见 function-reference）
 run_macro("D.xlsm", "AddTwo", args=[3, 4])  # 跑已有宏；save=True 时保存（写前自动备份）；Function 返回值进 result
 run_test("D.xlsm", TEST_CODE, timeout=120)  # 注入临时宏：code 须定义 Public RunTest；结束自动删模块、默认不保存
 build_check("D.xlsm")                       # 改完必查
 ```
 
-弹窗由看门狗自动关闭、错误文本进 `error`/`dialogs`（机制见「安全机制」）。**测试代码不要写依赖人工交互的逻辑**——MsgBox 会被自动点掉，InputBox 只拿到空串。**结果含 NBSP/零宽字符等特殊字符时，控制台可能显示成 `?`**——勿轻信显示，用 `run_macro` 单独取回结果按字符码复核再下结论。
+弹窗由看门狗自动关闭、错误文本进 `error`/`dialogs`（机制见「安全机制」）。**测试代码不要写依赖人工交互的逻辑**——MsgBox 会被自动点掉，InputBox 只拿到空串。**结果含 NBSP/零宽字符等特殊字符时，控制台可能显示成 `?`**——勿轻信显示，再注入一段返回 `AscW()` 字符码列表的 `run_test` 复核再下结论。
 
 ## 文件格式约定
 
@@ -170,9 +172,11 @@ unpack_xlam("DataJoke.xlam", "DataJoke/")
 # 2. 从零初始化 customUI 全套设施（幂等，未定制过的包第一步必调）
 init_custom_ui("DataJoke/")
 
-# 3. 加分组/按钮（自闭合分组自动展开；tab_id 支持 id/idMso/idQ，可加到内置标签页）
+# 3. 加分组/按钮（自闭合分组自动展开；tab_id 支持 id/idQ 自定义页签。
+#    ⚠️ idMso 内置页签仅当 XML 里已有对应 <tab idMso="TabHome"> 覆盖元素时才能命中——
+#    默认模板只有 tabCustom，找不到时函数只警告并跳过，不会自动创建覆盖元素）
 add_group_to_ribbon("DataJoke/", '<group id="grpTools" label="工具"/>',
-                    tab_id="tabCustom")            # 或 tab_id="TabHome"（内置页签）
+                    tab_id="tabCustom")            # 内置页签需先写 <tab idMso="TabHome"> 覆盖元素
 add_button_to_ribbon("DataJoke/", "grpTools",
                      generate_button_xml(id="btnGo", label="执行",
                                          on_action="Go_Click", image_mso="Copy"))
@@ -188,6 +192,7 @@ pack_xlam("DataJoke/", "DataJoke_new.xlam", vba_source="DataJoke.xlam")
 ```
 
 **顺序规则**：`unpack → (改 XML/Ribbon) → (需要改 VBA 用 COM API 改原文件) → 预览 → pack(vba_source=原文件)`。输出路径不能与 vba_source 相同。
+**pack 之后的交接**：以新文件为准——需要保留原文件名就 `backup_file("DataJoke.xlam", reason="pack-replace")` 留底后 `os.replace("DataJoke_new.xlam", "DataJoke.xlam")` 覆盖回去（`os.replace` 本身不备份，须显式 backup），**后续所有操作（改 VBA / 再解包 / 重载）一律用原路径**，否则新旧两个文件会各改各的。
 
 ---
 
@@ -208,7 +213,7 @@ if is_file_locked("MyTools.xlam"):      # 纯文件系统检测，不启 COM
 reload_addin("MyTools")                 # 重载（⚠️ 同会话卸载后需重启才真正恢复，见下）
 ```
 
-⚠️ **本机构建（Office 16）实测：COM 方式安装/重载（`AddIns.Add` + `Installed=True`）只完成注册，不即时装载工程**。因此 `reload_addin` 返回的 `loaded=True` 只代表标志置位，**是否真正装载必须看 `workbook_loaded` 字段**（或用 `xl.Workbooks` 复核）；为 False 时让用户**重启 Excel** 或在加载项对话框手动勾选验收（已注册的加载项在 Excel 启动时会正常自动加载）。另：Backstage 界面（未开工作簿）的 Excel 不注册 ROT，`GetActiveObject` 附着不上。
+⚠️ **本机 Office 16 实测：COM 安装/重载不即时装载工程**——以 `reload_addin` 返回的 `workbook_loaded` 字段为准（False 则让用户重启 Excel 或在加载项对话框手动勾选验收）。机制细节与 Backstage 附着问题见 `references/troubleshooting.md`。
 
 要点：
 

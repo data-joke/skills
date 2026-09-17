@@ -16,7 +16,8 @@
 3. 把其中的 vba-dev 子目录完整复制到你的技能（skills）目录下，目录名保持 vba-dev
 4. 安装 Python 依赖：pip install pywin32 Pillow（如需 AI 生成图标，另装 requests）
 5. 验证：运行 python <技能目录>/vba-dev/scripts/test_xlam_toolkit.py，
-   66 项测试全部通过即安装成功（纯静态测试，不会启动 Excel）
+   89 项测试全部通过即安装成功（纯静态测试，不会启动 Excel；其中 7 个 Excel
+   端到端用例默认跳过，设 VBA_DEV_EXCEL_TESTS=1 可启用）
 6. 清理临时目录，然后简要告诉我 vba-dev 能做什么、怎么用
 ```
 
@@ -62,15 +63,17 @@ unpack_xlam("MyTools.xlam", "pkg/")
 init_custom_ui("pkg/")                          #    从零初始化功能区
 add_button_to_ribbon("pkg/", "grp", btn_xml)    #    加按钮
 render_ribbon_preview("pkg/", "preview.png")    #    先看一眼布局（功能区装进 Excel 前唯一可见的验收材料）
-pack_xlam("pkg/", "MyTools.xlam", vba_source="MyTools.xlam")  # 6. 打包
+pack_xlam("pkg/", "MyTools_new.xlam", vba_source="MyTools.xlam")  # 6. 打包（输出必须换新路径）
+backup_file("MyTools.xlam", reason="pack-replace")                #    留底（os.replace 不自带备份）
+os.replace("MyTools_new.xlam", "MyTools.xlam")                    #    覆盖回原名，后续操作一律用原路径
 ```
 
 ### 图标生成的三种方式
 
 ```python
 check_icon_api()                                # 预检 API（缺配置/URL不通/key无效 → 精准诊断）
-src = generate_icon("扁平风格扫帚图标，透明背景")  # ① AI 生成（OpenAI 兼容/MiniMax 自动适配）
-src = draw_icon("清", bg=(31, 78, 146))          # ② 离线兜底：字符图标，零依赖
+src = generate_icon("扁平风格扫帚图标，透明背景", "icon_broom.png")  # ① AI 生成（out_png 必填）
+src = draw_icon("清", "icon_clean.png", bg=(31, 78, 146))          # ② 离线兜底：字符图标（out_png 必填）
 # ③ 内置图标：COMMON_IMAGEMSO（实测有效清单）或 validate_imagemso() 校验
 add_icon_button(dir, group, id, label, on_action, icon_png=src)  # 规整+注册+加按钮一步到位
 ```
@@ -79,7 +82,7 @@ add_icon_button(dir, group, id, label, on_action, icon_png=src)  # 规整+注册
 
 ## 示例作品
 
-- [examples/Excel游戏厅.xlsm](examples/Excel游戏厅.xlsm) —— 基于 vba-dev 全流程开发的示例宏工作簿，可直接下载体验，也可作为 AI 开发 Excel 插件/宏工程的参考样例。
+- [examples/Excel游戏厅.xlsm](examples/Excel游戏厅.xlsm) —— 基于 vba-dev 全流程开发的示例宏工作簿，可直接下载体验；AI 想参考其实现，用 `export_vba_source` 导出源码研读（二进制工作簿本身不可直接读）。
 
 ## 系统要求
 
@@ -87,7 +90,7 @@ add_icon_button(dir, group, id, label, on_action, icon_png=src)  # 规整+注册
 
 - Python 3.10+，`pywin32` 必需，`Pillow`（图标）、`requests`（AI 图标）推荐
 - 已在中文 Office 16 + GBK 控制台环境下全面实测（真实插件 0→1 构建 + 真实 API 联调）
-- 随附回归测试 `scripts/test_xlam_toolkit.py`（66 项，改工具代码后可一键自验，见下）
+- 随附回归测试 `scripts/test_xlam_toolkit.py`（89 项；其中 7 个 Excel 端到端用例默认跳过，设 `VBA_DEV_EXCEL_TESTS=1` 启用——发布或改工具代码后建议连端到端一起跑）
 
 > ⚠️ **macOS 用户注意**：本技能的自动化链路依赖 Windows 独有的 Excel COM 接口（`pywin32`），macOS 版 Excel 不提供该接口，且 Mac 版 Excel 的 VBA 适配不全（如不支持 ActiveX、窗体/功能区能力受限）。因此在 macOS 上本技能无法正常运行；技能生成的 `.xlsm` / `.xlam` 在 Mac Excel 中打开时，部分功能同样可能不可用。请优先在 Windows 环境使用。
 

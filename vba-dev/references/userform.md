@@ -60,12 +60,35 @@ MultiPage 相关怪癖（均已实测）：
 
 ## 窗体设计怎么改
 
-`.frm` 是**二进制**文件，导出后不要试图用文本编辑器改窗体布局——走 COM API：
+`.frm` 导出文件本身是**文本**（VERSION 头 + 控件几何 + 代码），伴生的 `.frx` 才是
+**二进制**（图片等属性），且两者必须同步——所以不要试图用文本编辑器改窗体布局，走 COM API：
 `add_control()` / `set_form_properties()` / `add_form_event_handler()` 增删控件与属性，
 改完 `lint_form()` 检查几何，再 `build_check()` 验证。
 
 `MSForms.*` 类型来自 **Microsoft Forms 2.0 Object Library**——含 UserForm 的工程会自动携带该引用，
 接收方无需手动勾选，因此**不需要后期绑定**（见 `binding-rules.md`）。
+
+## 窗体怎么验收（自动化的边界）
+
+`lint_form` 只查几何；**模态窗体无法自动冒烟**——在 `run_test` 里写 `UserForm1.Show`
+会一直挂到超时强杀（模态窗体不是 MsgBox，看门狗不认，也无预警）。验收口径：
+
+- **逻辑抽出来测**：窗体背后的处理逻辑写成模块级纯函数（与事件处理器分离），
+  `run_test` 直接调它——与 SKILL.md「可测试结构」口径一致
+- **初始化可以不 Show 地验证**（`UserForms.Add` 加载并触发 `UserForm_Initialize`
+  但不显示，不会挂起）：
+
+  ```vba
+  ' run_test 注入的代码：
+  Public Function RunTest() As String
+      Dim f As Object
+      Set f = VBA.UserForms.Add("frmMy")      ' 触发 Initialize，窗体不显示
+      RunTest = "items=" & f.cmbType.ListCount ' 断言初始化效果
+      Unload f
+  End Function
+  ```
+
+- **视觉与交互人工验收**：交付时让用户跑一次真窗体确认布局与动线
 
 ## 布局与视觉口径（交付前的自查清单）
 

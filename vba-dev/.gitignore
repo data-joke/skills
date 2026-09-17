@@ -2,8 +2,9 @@
 __pycache__/
 *.pyc
 
-# 防御性双保险：真实配置本应存放在 ~/.claude/vba-dev/（skill 目录外），
-# 此规则防止任何意外落入 skill 目录的配置被提交
+# 防御性双保险：真实配置存放在 ~/.vba-dev/（skill 目录外，旧位置
+# ~/.claude/vba-dev/ 由工具自动迁移），此规则防止任何意外落入
+# skill 目录的配置被提交
 icon_config.json
 preferences.json
 

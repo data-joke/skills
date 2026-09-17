@@ -19,7 +19,7 @@
 | `check_environment(verbose=True)` | 返回环境诊断 dict |
 | `enable_vba_trust()` | 写注册表启用 VBA 工程访问（HKCU） |
 | `shutdown_excel(force_wait=5)` | 关闭工具缓存的隔离实例（Quit 后验证，存活则强杀；脚本结尾可显式调用） |
-| `is_file_locked(path)` / `unload_addin(addin)` / `reload_addin(addin, path=None)` | 检测文件锁 / 在用户 Excel 卸载插件释放锁 / 重新加载（已装插件升级链路，默认 attach 用户实例）；返回含 `workbook_loaded` 复核字段——本 Office 构建实测 COM 安装/重载不即时装载工程（UI 对话框可、启动时自动加载可），装后建议重启 Excel 验收 |
+| `is_file_locked(path)` / `unload_addin(addin)` / `reload_addin(addin, path=None)` | 检测文件锁 / 在用户 Excel 卸载插件释放锁（用户 Excel 未运行时直接返回，不动注册表）/ 重新加载（已装插件升级链路，默认 attach 用户实例）；`reload_addin` 返回含 `workbook_loaded` 复核字段（本机构建 COM 安装不即时装载工程），装后建议重启 Excel 验收——机制详见 `references/troubleshooting.md` |
 
 ## 源码同步
 
@@ -32,9 +32,9 @@
 
 | 函数 | 说明 |
 |------|------|
-| `build_check(file, compile=True, strict=False, timeout=60, check_binding=True)` | 静态 + 真编译；strict 附加 Option Explicit/重名检查；check_binding 拦截外部类型库的前期绑定（默认开） |
-| `run_macro(file, name, args=None, timeout=120, save=False)` | 运行宏捕获错误 |
-| `run_test(file, code, proc_name="RunTest", timeout=120, keep=False)` | 临时测试宏；keep=True 保留并保存 |
+| `build_check(file, compile=True, strict=False, timeout=60, check_binding=True, assume_trusted=False)` | 静态 + 真编译；strict 附加 Option Explicit/重名检查；check_binding 拦截外部类型库的前期绑定（默认开）。compile=False 是纯静态（宏禁用打开，可用于不可信文件）；compile=True 以宏启用打开，带网络下载标记（MOTW）的文件会被拒绝，审阅确认后传 assume_trusted=True |
+| `run_macro(file, name, args=None, timeout=120, save=False, assume_trusted=False)` | 运行已有宏捕获错误（save=True 保存，写前自动备份）；宏启用打开，MOTW 拦截同上 |
+| `run_test(file, code, proc_name="RunTest", args=None, timeout=120, keep=False, assume_trusted=False)` | 注入临时测试宏（默认跑完即删、文件不变）；keep=True 保留模块并保存；宏启用打开，MOTW 拦截同上 |
 | `lint_form(file, form_name)` | 窗体几何检查 {findings, ok} |
 
 ## 备份
@@ -65,7 +65,7 @@
 | `unpack_xlam(file, dir)` / `pack_xlam(dir, out, vba_source=None)` | 解包/打包；改过 VBA 后打包必须传 `vba_source` 防止代码回退 |
 | `get_ribbon_xml(dir)` / `set_ribbon_xml(dir, xml)` | 读写 customUI.xml（set 对未初始化的包自动初始化） |
 | `add_button_to_ribbon(dir, group_id, button_xml, after_button_id=None)` | 加按钮（支持自闭合分组、id/idQ 定位） |
-| `add_group_to_ribbon(dir, group_xml, after_group_id=None, tab_id=None)` | 加分组；`tab_id` 支持 id/**idMso**/idQ，可加到内置标签页 |
+| `add_group_to_ribbon(dir, group_xml, after_group_id=None, tab_id=None)` | 加分组；`tab_id` 支持 id/idQ 自定义页签。⚠️ **idMso 内置页签只在 XML 已有对应 `<tab idMso="...">` 覆盖元素时命中**（默认模板只有 `tabCustom`）——找不到时仅打印 Warning 并跳过，不报错不创建；要先手写覆盖元素再传该 idMso |
 | `register_icon(dir, icon_id, png_path)` / `unregister_icon(dir, icon_id)` | 注册/注销 PNG 图标（自动维护 rels + Content-Types） |
 | `get_icon_rels(dir)` / `set_icon_rels(dir, rels_content)` | 读写 customUI.xml.rels（底层；`register_icon` 已封装，一般无需直接调用） |
 | `generate_button_xml(...)` / `generate_group_xml(...)` | XML 生成 |
@@ -80,7 +80,7 @@
 | `add_control(file, form, progid, name, properties, event_handler, container, page)` | 加控件，属性直接映射（Caption/Left/Top/Width/Height/List/...）；MultiPage 容器用 `page=` 指定页（索引/页名，见 `references/userform.md`），Frame 走 `container` 即可；`event_handler` 已废弃（MSForms 靠命名约定绑定） |
 | `add_form_event_handler(file, form, event_name, code)` | 加事件处理 |
 | `set_form_properties(file, form, properties)` | 设置窗体属性 |
-| `generate_form_init_handler(form_name, form_properties)` | 生成初始化代码 |
+| `generate_form_init_handler(form_name, form_properties)` | 生成 `UserForm_Initialize` 处理器（事件名固定，与窗体名无关——`{form_name}_Initialize` 永不触发；`form_name` 仅作标注） |
 
 ## 图标
 
@@ -92,7 +92,7 @@
 | `draw_icon(text, out_png, bg, fg, canvas=64)` | 离线兜底绘制（中英文均可） |
 | `prepare_icon(src, out, size=32, rounded=True, white_to_alpha=False)` | 尺寸规整：居中裁切缩放 + 圆角 alpha + 可选白底转透明 |
 | `add_icon_button(xlam_dir, group_id, button_id, label, on_action, icon_png, screentip="", supertip="", size="large", rounded=True, white_to_alpha=False, after_button_id=None)` | **一站式**：规整→注册→加按钮；AI 生成的图标必须传 `white_to_alpha=True` |
-| `validate_imagemso(names)` | 进程内验证 imageMso 有效性（pywin32 进程外调用全部假失败，勿用） |
+| `validate_imagemso(names)` | **验证 imageMso 有效性（可靠，用它）**。注意：验证必须在进程内做——pywin32 下从进程外直调 `CommandBars.GetImageMso` 全部假失败，别绕开本函数自己调 |
 | `COMMON_IMAGEMSO` | 实测有效图标名清单 dict（按类别） |
 
 ## 用户偏好（跨会话）

@@ -76,6 +76,22 @@ open(p, "w", encoding="utf-8").write(xml)
 
 ## VBA 回调模式
 
+### 先接线 onLoad（否则刷新类回调全部失效）
+
+动态回调（`getLabel`/`getVisible`/`getImage`）的返回值在功能区**加载时求值并缓存**，
+之后要 `IRibbonUI.Invalidate` 才重新求值——而拿到 `IRibbonUI` 的唯一途径是根元素
+的 `onLoad`（`init_custom_ui` 生成的骨架**不带**它，需要动态刷新时自己补上）：
+
+```xml
+<customUI xmlns="http://schemas.microsoft.com/office/2009/07/customui"
+          onLoad="InitializeRibbon">
+```
+
+不接 `onLoad`，`ribUI` 恒为 `Nothing`，`RefreshRibbon` 一调就运行时错误 91。
+纯静态按钮（无 get* 动态属性）不需要这步。
+
+### 回调签名与模板
+
 ```vba
 ' 按钮回调——On Error 必须在回调内吃掉错误，否则用户点按钮会弹 VBA 调试框
 Sub ButtonName_Click(control As IRibbonControl)
@@ -86,9 +102,13 @@ ErrHandler:
     MsgBox "执行失败: " & Err.Description, vbExclamation
 End Sub
 
-' 切换按钮
+' 切换按钮（注意块形式：单行 If 到行尾结束，"If x Then Else End If" 编译不过）
 Sub ToggleMode_Click(control As IRibbonControl, pressed As Boolean)
-    If pressed Then Else End If
+    If pressed Then
+        ' TODO: 开启模式
+    Else
+        ' TODO: 关闭模式
+    End If
 End Sub
 
 ' 动态标签/可见性
@@ -102,10 +122,15 @@ End Sub
 ' 下拉框数量/项目/选择
 Sub GetItemCount(control As IRibbonControl, ByRef count): count = 3: End Sub
 Sub GetItemLabel(control As IRibbonControl, index As Integer, ByRef label): label = "选项 " & index: End Sub
+' ⚠️ onChange 签名按控件区分，抄错即参数不匹配、运行时报错：
+'   dropDown  → (control, id As String, index As Integer)
+'   comboBox  → (control, text As String)   ← 收到的是用户输入的文本
 Sub Options_Changed(control As IRibbonControl, id As String, index As Integer)
 End Sub
+Sub Input_Changed(control As IRibbonControl, text As String)
+End Sub
 
-' 刷新功能区缓存
+' 刷新功能区缓存（依赖上方 onLoad 接线）
 Dim ribUI As IRibbonUI
 Sub InitializeRibbon(ribbon As IRibbonUI): Set ribUI = ribbon: End Sub
 Sub RefreshRibbon(): ribUI.Invalidate: End Sub
@@ -148,10 +173,10 @@ check_icon_api()         # 预检连通性（生成前必调）
 **典型用法**：
 
 ```python
-# 有 API：从提示词到按钮一步成型
-src = generate_icon("扁平风格橡皮擦图标，透明背景，主题蓝色 #1F4E92")
-# 无 API：离线兜底（圆角底 + 1-2 个中英文字符）
-src = draw_icon("清", bg=(31, 78, 146))
+# 有 API：从提示词到按钮一步成型（out_png 必填：生成图的存盘路径）
+src = generate_icon("扁平风格橡皮擦图标，透明背景，主题蓝色 #1F4E92", "icon_eraser.png")
+# 无 API：离线兜底（圆角底 + 1-2 个中英文字符；out_png 同样必填）
+src = draw_icon("清", "icon_clean.png", bg=(31, 78, 146))
 # 嵌入（自动规整为 32×32 圆角 + 注册 + 加按钮，一条调用）
 # AI 生成的图标必须传 white_to_alpha=True（模型会无视透明背景要求输出白底）
 add_icon_button(xlam_dir, "grpQuick", "btnClean", "清理文本",

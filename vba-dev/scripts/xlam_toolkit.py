@@ -45,6 +45,7 @@ import time
 import xml.etree.ElementTree as ET
 import zipfile
 from datetime import datetime
+from xml.sax.saxutils import escape as _xml_escape
 
 import win32com.client
 
@@ -83,6 +84,47 @@ def _proc_decl_re(proc_name: str):
         rf'(?:Sub|Function|Property\s+(?:Get|Let|Set))\s+'
         rf'{re.escape(proc_name)}\b',
         re.IGNORECASE | re.MULTILINE)
+
+
+def _xml_attr(value) -> str:
+    """Escape a value for use inside a double-quoted XML attribute.
+    Handles & < > and " — a raw & or " in label/screentip would produce
+    an invalid customUI.xml and Excel would refuse the WHOLE ribbon."""
+    return _xml_escape(str(value), {'"': "&quot;"})
+
+
+def _proc_type_of_decl(decl_line: str) -> str:
+    """Classify a procedure from its declaration line: Sub/Function/Property.
+
+    Must tolerate leading Public/Private/Friend/Static modifiers — the
+    CodeModule declaration line includes them, so a naive
+    startswith('Function') misfiles every 'Public Function ...' as Sub.
+    Unknown shapes conservatively return 'Sub' (previous behavior)."""
+    m = re.match(r"(?:Public\s+|Private\s+|Friend\s+)?(?:Static\s+)?"
+                 r"(Sub|Function|Property)\b", decl_line.strip(), re.IGNORECASE)
+    if not m:
+        return "Sub"
+    kw = m.group(1).lower()
+    return {"sub": "Sub", "function": "Function"}.get(kw, "Property")
+
+
+def _read_vba_text(src: str) -> str:
+    """Read a VBA source file: UTF-8 first, GBK fallback (legacy files).
+
+    When the GBK fallback has to REPLACE characters outside GBK (emoji etc.),
+    print an explicit warning — a silent '?' substitution corrupts VBA string
+    literals with no error anywhere in the export→edit→import round-trip."""
+    with open(src, "rb") as f:
+        raw = f.read()
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("gbk", errors="replace")
+        n_replaced = text.count("�")
+        if n_replaced:
+            print(f"Warning: {os.path.basename(src)} 含 {n_replaced} 个 GBK 外字符"
+                  f"（已替换为 '?'）——VBA 字符串字面量可能损坏，请将源文件改存 UTF-8")
+        return text
 
 
 def _proc_span(code_mod, proc_name: str):
@@ -675,7 +717,12 @@ def convert_to_xlsm(file_path: str, output_path: str = None, attach: bool = Fals
 
     if output_path is None:
         output_path = os.path.splitext(file_path)[0] + ".xlsm"
-    output_path = os.path.abspath(output_path)
+    else:
+        output_path = os.path.abspath(output_path)
+        if os.path.exists(output_path):
+            # 显式指定的输出已存在：SaveAs(DisplayAlerts=False) 会静默覆盖，
+            # 先备份（默认路径的覆盖备份由 _ensure_xlsm 负责，避免双备份）
+            backup_file(output_path, reason="convert-overwrite")
 
     excel, attached = _acquire_excel(attach)
     _apply_app_settings(excel, attached, mode="write")
@@ -768,6 +815,7 @@ def create_addin(xlam_path: str) -> str:
     try:
         wb = excel.Workbooks.Add()
         if os.path.exists(xlam_path):
+            backup_file(xlam_path, reason="create_addin-overwrite")
             os.remove(xlam_path)
         wb.SaveAs(xlam_path, FileFormat=XLAM_FORMAT)
         print(f"Created add-in: {xlam_path}")
@@ -791,7 +839,18 @@ def unpack_xlam(xlam_path: str, output_dir: str) -> None:
     xlam_path = os.path.abspath(xlam_path)
     output_dir = os.path.abspath(output_dir)
 
-    if os.path.exists(output_dir):
+    if os.path.isdir(output_dir):
+        # 护栏：只清空"像本工具解包产物"的目录（Office OPC 包必含
+        # [Content_Types].xml）或空目录——防止误传父目录等导致 rmtree
+        # 整目录销毁，与 export_vba_source 的 manifest.json 校验同一思路
+        # （空目录放行：mkdtemp 预建目录 + render_ribbon_preview 内部
+        # 解包会走到这里）
+        is_unpack_product = os.path.exists(
+            os.path.join(output_dir, "[Content_Types].xml"))
+        if not (is_unpack_product or not os.listdir(output_dir)):
+            raise ValueError(
+                f"目录已存在且不是本工具的解包产物（缺 [Content_Types].xml），"
+                f"拒绝清空: {output_dir}")
         shutil.rmtree(output_dir)
     os.makedirs(output_dir)
 
@@ -835,8 +894,9 @@ def pack_xlam(source_dir: str, output_xlam: str, vba_source: str = None) -> None
             else:
                 print(f"[vba] warning: {vba_source} has no vbaProject.bin — nothing to refresh")
 
-    # Remove existing output file
+    # Remove existing output file (backed up first — removal is destructive)
     if os.path.exists(output_xlam):
+        backup_file(output_xlam, reason="pack-overwrite")
         os.remove(output_xlam)
 
     with zipfile.ZipFile(output_xlam, "w", zipfile.ZIP_DEFLATED) as z:
@@ -1029,6 +1089,15 @@ def add_button_to_ribbon(
         group_content = match.group(2)
         group_end = match.group(3)
 
+        # 查重：同 id 按钮重复追加（如 AI 对结果不确定时重试）会产出
+        # Excel 拒载的 customUI——先看组内是否已有该 id
+        new_id_m = re.search(r'\bid="([^"]+)"', button_xml)
+        if new_id_m and re.search(rf'\bid="{re.escape(new_id_m.group(1))}"',
+                                  group_content):
+            print(f"Warning: button id '{new_id_m.group(1)}' already in group "
+                  f"'{group_id}' — skipped (duplicate ids break the whole ribbon)")
+            return
+
         # Format button XML
         indented_button = "\n          " + button_xml.strip()
 
@@ -1146,21 +1215,21 @@ def generate_button_xml(
         Button XML string
     """
     attrs = [
-        f'id="{id}"',
-        f'label="{label}"',
+        f'id="{_xml_attr(id)}"',
+        f'label="{_xml_attr(label)}"',
         f'size="{size}"',
-        f'onAction="{on_action}"',
+        f'onAction="{_xml_attr(on_action)}"',
     ]
 
     if image_mso:
-        attrs.append(f'imageMso="{image_mso}"')
+        attrs.append(f'imageMso="{_xml_attr(image_mso)}"')
     elif image:
-        attrs.append(f'image="{image}"')
+        attrs.append(f'image="{_xml_attr(image)}"')
 
     if screentip:
-        attrs.append(f'screentip="{screentip}"')
+        attrs.append(f'screentip="{_xml_attr(screentip)}"')
     if supertip:
-        attrs.append(f'supertip="{supertip}"')
+        attrs.append(f'supertip="{_xml_attr(supertip)}"')
 
     return f'<button {" ".join(attrs)}/>'
 
@@ -1182,7 +1251,7 @@ def generate_group_xml(
         Group XML string
     """
     buttons_xml = "\n          ".join(buttons)
-    return f'''<group id="{id}" label="{label}">
+    return f'''<group id="{_xml_attr(id)}" label="{_xml_attr(label)}">
           {buttons_xml}
         </group>'''
 
@@ -2207,6 +2276,33 @@ def _restore_app_settings(excel, snapshot: dict) -> None:
             pass
 
 
+def _has_mark_of_the_web(path: str) -> bool:
+    """True when the file carries an NTFS Zone.Identifier ADS — i.e. it was
+    downloaded from the internet / saved from an email attachment. Pure
+    filesystem probe (no COM); non-NTFS filesystems simply have no ADS."""
+    try:
+        with open(path + ":Zone.Identifier", "rb"):
+            return True
+    except OSError:
+        return False
+
+
+def _refuse_untrusted(path: str, assume_trusted: bool = False) -> None:
+    """Gate before opening a file with macros ENABLED (run_macro / run_test /
+    build_check's real compile). The isolated Excel instance is NOT a sandbox:
+    Workbook_Open / Auto_Open run with the user's full privileges (Shell,
+    FileSystemObject, WinAPI all reachable). A MOTW-flagged file must not go
+    through this path without an explicit trust decision."""
+    if assume_trusted or not _has_mark_of_the_web(path):
+        return
+    raise ValueError(
+        f"文件带网络下载标记（Zone.Identifier），拒绝以宏启用方式打开: {path}\n"
+        "打开瞬间 Workbook_Open/Auto_Open 将以你的用户权限执行（隔离实例不是沙箱）。\n"
+        "处理方式：① export_vba_source 导出源码人工审阅（重点 Declare/Shell/"
+        "CreateObject）确认无害后，传 assume_trusted=True；② 确认可信后由用户"
+        "手动解除锁定再试。")
+
+
 @contextlib.contextmanager
 def _open_workbook(file_path: str, mode: str = "write", attach: bool = False,
                    backup_reason: str = "write", save: bool = None,
@@ -2257,7 +2353,12 @@ def _open_workbook(file_path: str, mode: str = "write", attach: bool = False,
         wb = excel.Workbooks.Open(path, ReadOnly=(mode == "read"), UpdateLinks=0)
         yield excel, wb, path
         if mode == "write" or save:
-            wb.Save()
+            try:
+                wb.Save()
+            except Exception as e:
+                # 看门狗强杀后 Excel 已死，收尾的 Save 必抛 com_error——不能让
+                # 已妥善构造的超时结果在退出路径上变成未处理异常
+                print(f"Warning: save-on-close skipped ({e})")
     finally:
         if wb is not None:
             try:
@@ -2446,12 +2547,7 @@ def list_procedures(xlam_path: str, module_name: str, attach: bool = False) -> d
                     proc_code = code_mod.Lines(body_line, proc_lines)
 
                     first_line = proc_code.split('\n')[0]
-                    if first_line.strip().startswith("Function"):
-                        proc_type = "Function"
-                    elif first_line.strip().startswith("Property"):
-                        proc_type = "Property"
-                    else:
-                        proc_type = "Sub"
+                    proc_type = _proc_type_of_decl(first_line)
 
                     result["procedures"][proc_name] = {
                         "type": proc_type,
@@ -2885,12 +2981,7 @@ def import_vba_source(xlam_path: str, source_dir: str, sync: bool = False,
                     summary["skipped"].append(f"{name} (工作簿中无此文档模块)")
                     continue
                 cm = comp.CodeModule
-                with open(src, "rb") as f:
-                    raw = f.read()
-                try:
-                    text = raw.decode("utf-8")
-                except UnicodeDecodeError:
-                    text = raw.decode("gbk", errors="replace")
+                text = _read_vba_text(src)
                 code = _strip_vba_attributes(text)
                 if cm.CountOfLines:
                     cm.DeleteLines(1, cm.CountOfLines)
@@ -2904,12 +2995,7 @@ def import_vba_source(xlam_path: str, source_dir: str, sync: bool = False,
             # .bas/.cls are UTF-8 — re-encode to a temp GBK file first.
             import_src = src
             if os.path.splitext(src)[1] in (".bas", ".cls"):
-                with open(src, "rb") as f:
-                    raw = f.read()
-                try:
-                    text = raw.decode("utf-8")
-                except UnicodeDecodeError:
-                    text = raw.decode("gbk", errors="replace")
+                text = _read_vba_text(src)
                 base, ext = os.path.splitext(os.path.basename(src))
                 import_src = os.path.join(os.path.dirname(src),
                                           f"{base}.__import_tmp__{ext}")
@@ -3540,7 +3626,8 @@ def _hide_vbe_window(vbe) -> None:
 
 def build_check(xlam_path: str, compile: bool = True, strict: bool = False,
                 timeout: int = 60, attach: bool = False,
-                check_binding: bool = True) -> dict:
+                check_binding: bool = True,
+                assume_trusted: bool = False) -> dict:
     """
     检查工作簿的 VBA 工程，形成验证闭环：
 
@@ -3562,6 +3649,9 @@ def build_check(xlam_path: str, compile: bool = True, strict: bool = False,
             VBA project, so a distributed .xlam fails to compile on machines
             that have not ticked them. Opt a module out with a
             ' @allow-early-binding comment (needed for WithEvents sinks).
+        assume_trusted: Skip the Mark-of-the-Web gate for compile=True (file
+            flagged as downloaded from the internet). Review the source with
+            export_vba_source before passing this.
 
     Returns:
         {
@@ -3573,14 +3663,22 @@ def build_check(xlam_path: str, compile: bool = True, strict: bool = False,
         绑定类错误额外带 "kind": "early_binding" 字段，便于区分。
     """
     path = _require_macro_file(xlam_path)
+    if compile:
+        # 宏启用的打开只发生在真实编译路径；compile=False 走 ForceDisable，
+        # 静态层读 VBProject 不需要宏——这就是"不可信文件只允许静态检查"
+        # 红线的技术落点
+        _refuse_untrusted(path, assume_trusted)
     outcome = {"file": path, "ok": False,
                "static": {"errors": [], "warnings": [], "modules_checked": 0},
                "compile": None}
 
     # security='low': AutomationSecurity applies at OPEN time — a workbook
     # opened with macros disabled makes the VBE compile command and the
-    # probe run silently ineffective (false pass)
-    with _open_workbook(path, mode="edit", attach=attach, security="low") as (excel, wb, _):
+    # probe run silently ineffective (false pass). ONLY the real compile
+    # needs macros enabled; the static layer reads the VBProject fine under
+    # ForceDisable, so compile=False opens untrusted files safely.
+    with _open_workbook(path, mode="edit", attach=attach,
+                        security=("low" if compile else None)) as (excel, wb, _):
         outcome["static"] = _static_check_project(
             wb.VBProject, strict=strict, check_binding=check_binding)
         if compile:
@@ -3624,7 +3722,8 @@ def build_check(xlam_path: str, compile: bool = True, strict: bool = False,
 # ============================================================================
 
 def run_macro(xlam_path: str, macro_name: str, args: list = None,
-              timeout: int = 120, save: bool = False, attach: bool = False) -> dict:
+              timeout: int = 120, save: bool = False, attach: bool = False,
+              assume_trusted: bool = False) -> dict:
     """
     Run a macro in the workbook and capture its result / errors.
 
@@ -3639,11 +3738,14 @@ def run_macro(xlam_path: str, macro_name: str, args: list = None,
         timeout: Kill stuck Excel after this many seconds
         save: Save the workbook after the macro ran (default False)
         attach: Use the user's running Excel instance (default: isolated)
+        assume_trusted: Skip the Mark-of-the-Web gate (file downloaded from
+            the internet) — review the source first, see SKILL.md red-line
 
     Returns:
         {"ok": bool, "result": Any, "error": str|None,
          "dialogs": [...], "timed_out": bool}
     """
+    _refuse_untrusted(_require_macro_file(xlam_path), assume_trusted)
     out = {"ok": False, "result": None, "error": None, "dialogs": [], "timed_out": False}
     mode = "run"  # macros must be ENABLED for Run — never 'write' (would disable them)
 
@@ -3690,7 +3792,8 @@ def run_macro(xlam_path: str, macro_name: str, args: list = None,
 
 
 def run_test(xlam_path: str, code: str, proc_name: str = "RunTest", args: list = None,
-             timeout: int = 120, keep: bool = False, attach: bool = False) -> dict:
+             timeout: int = 120, keep: bool = False, attach: bool = False,
+             assume_trusted: bool = False) -> dict:
     """
     Inject a THROWAWAY test module, run it, then remove it again.
     The workbook file itself is never modified (unless keep=True).
@@ -3714,6 +3817,8 @@ def run_test(xlam_path: str, code: str, proc_name: str = "RunTest", args: list =
         timeout: Kill stuck Excel after this many seconds
         keep: Keep the test module and save (debugging aid; default False)
         attach: Use the user's running Excel instance (default: isolated)
+        assume_trusted: Skip the Mark-of-the-Web gate (file downloaded from
+            the internet) — review the source first, see SKILL.md red-line
 
     Returns:
         {"ok": bool, "result": Any, "error": str|None,
@@ -3724,12 +3829,16 @@ def run_test(xlam_path: str, code: str, proc_name: str = "RunTest", args: list =
     module_name = f"zzTmpTest{int(time.time())}"
     out["module"] = module_name
 
-    mode = "write" if keep else "run"
-    with _open_workbook(xlam_path, mode=mode, attach=attach,
+    _refuse_untrusted(_require_macro_file(xlam_path), assume_trusted)
+
+    # 恒用 'run' 模式：keep=True 若走 write，_apply_app_settings 会在 OPEN 前
+    # 强禁宏，注入的测试宏 Run 必报"宏被禁用"（open 后重设无效——
+    # AutomationSecurity 只在打开时生效）。保存需求由 save=keep 表达，
+    # 与 run_macro(save=True) 同一套路。
+    with _open_workbook(xlam_path, mode="run", attach=attach, save=keep,
                         backup_reason="run_test+keep") as (excel, wb, path):
         proj = wb.VBProject
         # Inject throwaway module (macros are enabled in 'run' mode)
-        excel.AutomationSecurity = MSO_SECURITY_LOW
         comp = proj.VBComponents.Add(VBEXT_CT_STDMODULE)
         comp.Name = module_name
         comp.CodeModule.AddFromString(code)
@@ -3854,6 +3963,10 @@ def unload_addin(addin: str, attach: bool = True) -> dict:
     if not attached:
         out["note"] = "未连接到用户 Excel（未在运行？）——文件本就无锁；若仍锁定请让用户关闭后重试"
         print(f"[addin] {out['note']}")
+        # 提前返回：隔离实例的 AddIns 集合同样读取（用户）注册表，在它上面
+        # 执行 Installed=False 会随实例退出被持久化——用户下次启动 Excel
+        # 加载项直接消失。无用户实例时根本没有锁要释放。
+        return out
     try:
         ai = _match_addin(excel, addin)
         if ai is None:
@@ -4117,7 +4230,9 @@ def add_form_event_handler(
         code_mod = wb.VBProject.VBComponents(form_name).CodeModule
 
         lines = code_mod.Lines(1, code_mod.CountOfLines) if code_mod.CountOfLines else ""
-        if f"Sub {event_name}" in lines:
+        # 词边界正则判重（与 add_vba_callback 一致）：裸子串 "Sub btnOK_Click"
+        # 会误命中 btnOK_Click2，导致事件处理器被静默跳过、事件永不触发
+        if _proc_decl_re(event_name).search(lines):
             print(f"Event handler '{event_name}' already exists")
             return
 
@@ -4321,14 +4436,21 @@ def generate_form_init_handler(form_name: str, form_properties: dict = None) -> 
     """
     Generate UserForm_Initialize handler.
 
+    The event procedure name is FIXED as 'UserForm_Initialize' — the
+    UserForm's Initialize event belongs to the form class itself and never
+    carries the form's name ('{form_name}_Initialize' would compile but
+    never fire). `form_name` is kept for call compatibility / documentation.
+
     Args:
-        form_name: UserForm name
+        form_name: UserForm name (not used in the generated code — the
+            handler is self-bound via the fixed event name; controls are
+            addressed through `Me`)
         form_properties: Dict of control initializations
 
     Returns:
         VBA event handler code
     """
-    lines = [f"Private Sub {form_name}_Initialize()"]
+    lines = ["Private Sub UserForm_Initialize()"]
 
     if form_properties:
         for ctrl_name, props in form_properties.items():
