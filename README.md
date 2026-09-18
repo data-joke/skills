@@ -1,4 +1,4 @@
-# 数据分析 Skills 集合
+﻿# 数据分析 Skills 集合
 
 按 skill 分目录存放,每个目录自包含(含 `SKILL.md` 指令 + 脚本 + 文档)。
 
@@ -6,6 +6,9 @@
 
 - [dataworks](dataworks/) — 阿里云 DataWorks 运维:新建/调整开发节点(调度/重跑/依赖/参数,可提交发布)、查实例状态与日志并分析失败原因、重跑/停止/置成功、按任务名或业务日期补数据并跟踪进度、按任务名解析 nodeId/fileId、查节点代码;并支持节点上下游血缘、实例聚合统计、业务流程、文件版本、表元数据/血缘、资源组、基线保障、数据质量(DQC,只读)。
 - [data-analysis](data-analysis/) — 数据分析专家 skill:对表格数据执行"需求澄清→数据探查→方法选择→因果归因→结构化报告"标准 SOP,支持转化/对比/异常/趋势/维度拆解/相关预测等方法论,交付 3-5 条核心发现 + ICE 评分行动清单,可生成单文件 HTML 报告(图表库全内嵌、零外链)。
+- [deep-dive](deep-dive/) — 深度研究文章 skill:先研究后写作再审查的流水线,产出专业、真实、系统、有深度的中文研究文章;关键论断 ID 制溯源、独立 agent 攻击式审查(全量来源核对+原文回访)、三档预算量化、四体裁骨架。
+- [github](github/) — 通过 `gh` CLI 操作 GitHub:Issue / PR 全流程 / Actions 运维 / Release / 搜索,内置环境自检与写操作安全确认。
+- [vba-dev](vba-dev/) — Excel 插件/加载项与宏工作簿开发:VBA 模块、Ribbon 功能区、用户窗体、图标,支持 .xlam/.xlsm,隔离 Excel 实例真实编译验证。
 
 ## 下载与安装
 
@@ -42,3 +45,4 @@ cp dataworks/config.example.env dataworks/.env
 ## 使用
 
 以 Claude Code 为例:把某个 skill 目录放到 `~/.claude/skills/<name>/`,即可被自动识别。每个 skill 的详细用法见其目录内 `README.md`。
+
